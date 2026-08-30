@@ -269,7 +269,7 @@ UPDATE targets
        http_error         = :http_error,
        status             = :status,
        http_checked_at    = :checked_at
- WHERE domain = :domain
+ WHERE domain = :domain AND is_freemail = 0
 """
 
 

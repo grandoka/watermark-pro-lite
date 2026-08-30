@@ -43,6 +43,15 @@ Configuration comes from the environment, never from code:
 | `CRAWLER_CONTACT_URL`, `CRAWLER_USER_AGENT` | identify the crawler truthfully |
 | `NEVERBOUNCE_API_KEY` / `ZEROBOUNCE_API_KEY` | deliverability verification (tier 1 only) |
 
+## Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+81 tests over the pure logic -- extraction, classification, dedupe,
+fingerprinting, scoring and tiering. No network.
+
 ## Stage 1 -- ingest
 
 Reads every sheet of every workbook and scans **all** cells with an email
@@ -52,6 +61,10 @@ emails spread across up to 14 unnamed columns.
 
 Emails are lowercased, stripped and validated, then **deduplicated by domain**
 (not by email), keeping the contact with the most recent `created` date.
+Freemail contacts are the exception and are keyed by full address: a mailbox
+provider is not a store, and collapsing by domain turned 31,048 consumer
+contacts into 129 rows -- 26k of them on gmail.com alone -- which would have
+emptied the ads tier before it was built.
 Each domain is flagged with `is_freemail`, `is_role`, `tld`, `created_year`
 and `jurisdiction` (`EU` / `CASL` / `PECR` / `PERMISSIVE` / `OTHER`).
 

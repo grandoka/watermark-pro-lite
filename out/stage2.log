@@ -36,3 +36,8 @@ Stage 2 -- DNS for 156,223 domains (concurrency 600, timeout 5.0s, 2 retries)
    33,000/156,223 ( 21.1%) domains resolved |    37.0/s | elapsed 0:14:50 | ETA 0:55:26
    34,000/156,223 ( 21.8%) domains resolved |    37.0/s | elapsed 0:15:18 | ETA 0:55:00
    35,000/156,223 ( 22.4%) domains resolved |    37.0/s | elapsed 0:15:45 | ETA 0:54:35
+   36,000/156,223 ( 23.0%) domains resolved |    37.0/s | elapsed 0:16:12 | ETA 0:54:08
+   37,000/156,223 ( 23.7%) domains resolved |    37.0/s | elapsed 0:16:39 | ETA 0:53:42
+   38,000/156,223 ( 24.3%) domains resolved |    37.0/s | elapsed 0:17:07 | ETA 0:53:15
+   39,000/156,223 ( 25.0%) domains resolved |    37.0/s | elapsed 0:17:34 | ETA 0:52:49
+   40,000/156,223 ( 25.6%) domains resolved |    37.0/s | elapsed 0:18:02 | ETA 0:52:24

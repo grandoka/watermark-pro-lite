@@ -1,0 +1,334 @@
+"""Tests for the pure logic: extraction, classification, fingerprinting, tiering.
+
+Nothing here touches the network. The stages that do are thin wrappers around
+these functions, so this is where the behaviour that decides who gets emailed
+is pinned down.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import sqlite3
+
+import pytest
+
+from pipeline import config, db
+from pipeline.stage1_ingest import classify, clean_email, row_created, _is_header
+from pipeline.stage3_http import (candidate_urls, detect_platform, extract_title,
+                                  fingerprint)
+from pipeline.stage4_score import (DROPPED, TIER1, TIER2, TIER3, assign,
+                                   recency_points, score_row)
+
+
+# --- stage 1: extraction ---------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("  Info@Example.COM ", "info@example.com"),
+    ("mailto:sales@shop.de", "sales@shop.de"),
+    ("contact@store.co.uk,", "contact@store.co.uk"),
+    ("<hola@tienda.es>", "hola@tienda.es"),
+    ("not an email", None),
+    ("broken@nodot", None),
+    ("two@@at.com", None),
+    ("spaced @ out.com", None),
+])
+def test_clean_email(raw, expected):
+    assert clean_email(raw) == expected
+
+
+def test_scanner_splits_packed_cells():
+    """Source cells pack several addresses together with colons."""
+    cell = "corporatestationbd@gmail.com:info@corporatestationbd.com"
+    found = [clean_email(m) for m in config.EMAIL_SCAN.findall(cell)]
+    assert found == ["corporatestationbd@gmail.com", "info@corporatestationbd.com"]
+
+
+def test_header_row_detected_only_when_it_is_one():
+    assert _is_header(("created", "emails"))
+    # The headerless sheets start straight in on data.
+    assert not _is_header(("info@hearfit.ca", "support@hearfit.ca"))
+    assert not _is_header((None, None))
+
+
+def test_row_created_finds_the_date_in_any_position():
+    stamp = dt.datetime(2024, 6, 7)
+    assert row_created(("a@b.com", stamp)) == stamp
+    assert row_created((stamp, "a@b.com")) == stamp
+    assert row_created(("a@b.com", "c@d.com")) is None
+
+
+# --- stage 1: classification -----------------------------------------------
+
+def test_store_domain_is_keyed_by_domain():
+    rec = classify("info@mystore.com")
+    assert rec["target_key"] == "mystore.com"
+    assert rec["is_freemail"] == 0
+    assert rec["is_role"] == 1
+    assert rec["status"] == config.STATUS_PENDING
+
+
+def test_freemail_is_keyed_by_address_so_contacts_are_not_collapsed():
+    """26k gmail contacts must stay 26k rows, not become one gmail.com row."""
+    a = classify("shop.one@gmail.com")
+    b = classify("shop.two@gmail.com")
+    assert a["target_key"] != b["target_key"]
+    assert a["domain"] == b["domain"] == "gmail.com"
+    assert a["is_freemail"] == 1
+    assert a["status"] == config.STATUS_FREEMAIL
+
+
+@pytest.mark.parametrize("domain, freemail", [
+    ("gmail.com", True), ("web.de", True), ("mail.ru", True),
+    ("gmx.de", True), ("gmx.net", True), ("yandex.ru", True),
+    ("t-online.de", True), ("proton.me", True), ("libero.it", True),
+    ("mystore.com", False), ("gmail-store.com", False), ("mailbox-shop.de", False),
+])
+def test_freemail_detection(domain, freemail):
+    assert config.is_freemail_domain(domain) is freemail
+
+
+@pytest.mark.parametrize("email, jurisdiction", [
+    ("a@shop.de", "EU"), ("a@shop.fr", "EU"), ("a@shop.eu", "EU"),
+    ("a@shop.ca", "CASL"),
+    ("a@shop.uk", "PECR"), ("a@shop.co.uk", "PECR"),
+    ("a@shop.com", "PERMISSIVE"), ("a@shop.com.au", "PERMISSIVE"),
+    ("a@shop.store", "PERMISSIVE"),
+    ("a@shop.ru", "OTHER"), ("a@shop.br", "OTHER"),
+])
+def test_jurisdiction(email, jurisdiction):
+    assert classify(email)["jurisdiction"] == jurisdiction
+
+
+# --- stage 1: dedupe by domain, keeping the newest contact -----------------
+
+def upsert(conn, email, created):
+    from pipeline.stage1_ingest import UPSERT
+    rec = classify(email)
+    rec.update(created=created, created_year=int(created[:4]) if created else None,
+               source_file="t.xlsx", source_sheet="Sheet1")
+    conn.execute(UPSERT, rec)
+    conn.commit()
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    connection = db.connect(str(tmp_path / "t.db"))
+    yield connection
+    connection.close()
+
+
+def test_domain_dedupe_keeps_the_most_recent_contact(conn):
+    upsert(conn, "old@store.com", "2019-01-01 00:00:00")
+    upsert(conn, "new@store.com", "2024-05-05 00:00:00")
+    upsert(conn, "older@store.com", "2017-01-01 00:00:00")
+    row = conn.execute("SELECT * FROM targets").fetchone()
+    assert conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 1
+    assert row["email"] == "new@store.com"
+    assert row["created_year"] == 2024
+    assert row["email_count"] == 3
+
+
+def test_a_dated_contact_beats_an_undated_one(conn):
+    upsert(conn, "nodate@store.com", None)
+    upsert(conn, "dated@store.com", "2023-03-03 00:00:00")
+    assert conn.execute("SELECT email FROM targets").fetchone()[0] == "dated@store.com"
+
+
+def test_reingest_does_not_clobber_enrichment(conn):
+    """Stage 1 must be safe to re-run after hours of crawling."""
+    upsert(conn, "info@store.com", "2024-01-01 00:00:00")
+    conn.execute("UPDATE targets SET dns_resolves = 1, platform = 'Shopify', "
+                 "status = 'live', http_checked_at = '2026-01-01'")
+    conn.commit()
+    upsert(conn, "info@store.com", "2024-01-01 00:00:00")
+    row = conn.execute("SELECT * FROM targets").fetchone()
+    assert row["platform"] == "Shopify"
+    assert row["status"] == "live"
+    assert row["http_checked_at"] == "2026-01-01"
+
+
+# --- stage 3: fingerprinting ----------------------------------------------
+
+@pytest.mark.parametrize("html, platform", [
+    ('<script src="https://cdn.shopify.com/s/x.js">', "Shopify"),
+    ('<link href="/wp-content/plugins/woocommerce/a.css">', "WooCommerce"),
+    ('<img src="https://cdn11.bigcommerce.com/s-abc/x.png">', "BigCommerce"),
+    ('<script>require(["Magento_Ui/js/core"])</script>', "Magento"),
+    ('<div id="prestashop" data-x>', "PrestaShop"),
+    ('<style>._wixCssVars{}</style>', "Wix"),
+    ('<img src="https://static1.squarespace.com/x.png">', "Squarespace"),
+    ('<a href="index.php?route=common/home">', "OpenCart"),
+    ('<div class="plain old site"></div>', None),
+])
+def test_platform_detection(html, platform):
+    assert detect_platform(html, {}) == platform
+
+
+def test_image_urls_are_not_magento():
+    """A bare 'mage/' needle matches every 'image/' path -- it mislabelled 18%
+    of live stores before the signatures became anchored regexes."""
+    html = '<img src="/media/image/hero.png"><link href="/assets/images/a.css">'
+    assert detect_platform(html, {}) is None
+
+
+def test_platform_detection_from_headers():
+    assert detect_platform("<html></html>", {"x-shopid": "12345"}) == "Shopify"
+    assert detect_platform("<html></html>", {"x-wix-request-id": "abc"}) == "Wix"
+
+
+def test_extract_title_unescapes_and_collapses():
+    assert extract_title("<title>\n  Caf&eacute;  &amp;  Shop\n</title>") == "Café & Shop"
+    assert extract_title("<html>no title</html>") is None
+
+
+@pytest.mark.parametrize("html", [
+    '<a href="/cart">Cart</a>',
+    '<form action="https://shop.com/checkout" method="post">',
+    '<a href="/panier">Panier</a>',
+    '<button class="add-to-cart">Add</button>',
+])
+def test_cart_detection(html):
+    assert fingerprint(html.encode(), {})["has_cart"] == 1
+
+
+def test_product_schema_detection():
+    body = b'<script type="application/ld+json">{"@type": "Product"}</script>'
+    assert fingerprint(body, {})["has_product_schema"] == 1
+    assert fingerprint(b"<html></html>", {})["has_product_schema"] == 0
+
+
+@pytest.mark.parametrize("body", [
+    b"<title>This domain is for sale</title>",
+    b"<html><body>Buy this domain</body></html>",
+    b"<title>Welcome to nginx!</title>",
+])
+def test_parked_detection(body):
+    assert fingerprint(body, {})["is_parked"] == 1
+
+
+def test_lang_extraction():
+    assert fingerprint(b'<html lang="de-DE">', {})["lang"] == "de-de"
+
+
+def test_candidate_urls_start_from_the_host_that_resolved():
+    assert candidate_urls("shop.com", "shop.com")[0] == "https://shop.com/"
+    assert candidate_urls("shop.com", "www.shop.com")[0] == "https://www.shop.com/"
+    assert candidate_urls("shop.com", None) == [
+        "https://shop.com/", "http://shop.com/", "https://www.shop.com/"]
+
+
+# --- stage 4: scoring and tiering -----------------------------------------
+
+def make_row(**overrides):
+    row = {"status": config.STATUS_LIVE, "platform": "Shopify", "has_cart": 1,
+           "has_product_schema": 1, "created_year": 2024, "has_mx": 1,
+           "response_time_ms": 500, "is_role": 0, "is_freemail": 0,
+           "is_parked": 0, "http_status": 200, "jurisdiction": "PERMISSIVE"}
+    row.update(overrides)
+    return row
+
+
+def test_score_is_bounded_and_ordered():
+    assert score_row(make_row()) == 100
+    weak = make_row(platform=None, has_product_schema=0, created_year=2016,
+                    has_mx=0, response_time_ms=9000, is_role=1)
+    assert 0 <= score_row(weak) < score_row(make_row())
+
+
+def test_platform_fit_dominates():
+    shopify = score_row(make_row(platform="Shopify"))
+    wix = score_row(make_row(platform="Wix"))
+    none = score_row(make_row(platform=None))
+    assert shopify > wix > none
+
+
+def test_role_inbox_is_a_small_penalty():
+    assert score_row(make_row()) - score_row(make_row(is_role=1)) == 5
+
+
+def test_recency_points_are_monotonic():
+    assert (recency_points(2025) >= recency_points(2023)
+            >= recency_points(2021) >= recency_points(2018) == 0)
+    assert recency_points(None) == 0
+
+
+def test_permissive_store_is_cleared_for_email():
+    tier, score, _ = assign(make_row(), 55)
+    assert tier == TIER1 and score >= 55
+
+
+def test_uk_is_emailable_but_eu_and_canada_are_ads_only():
+    assert assign(make_row(jurisdiction="PECR"), 55)[0] == TIER1
+    for jurisdiction in ("EU", "CASL", "OTHER"):
+        tier, _, reason = assign(make_row(jurisdiction=jurisdiction), 55)
+        assert tier == TIER2, jurisdiction
+        assert "never email" in reason or "no cold email" in reason
+
+
+def test_freemail_never_reaches_the_email_tier():
+    tier, _, reason = assign(make_row(status=config.STATUS_FREEMAIL), 55)
+    assert tier == TIER2
+    assert "never email" in reason
+
+
+def test_freemail_on_a_permissive_tld_is_still_ads_only():
+    """gmail.com is a .com, which must not make its contacts emailable."""
+    row = make_row(is_freemail=1, jurisdiction="PERMISSIVE")
+    assert assign(row, 55)[0] == TIER2
+
+
+def test_no_mx_cannot_be_emailed():
+    assert assign(make_row(has_mx=0), 55)[0] == TIER2
+
+
+def test_low_score_goes_to_nurture():
+    weak = make_row(platform=None, has_product_schema=0, created_year=2016,
+                    response_time_ms=8000)
+    tier, score, _ = assign(weak, 55)
+    assert tier == TIER3 and score < 55
+
+
+@pytest.mark.parametrize("row, fragment", [
+    (make_row(is_parked=1), "parked"),
+    (make_row(status=config.STATUS_PARKED), "parked"),
+    (make_row(has_cart=0), "cart"),
+    (make_row(http_status=404), "non-200"),
+    (make_row(status=config.STATUS_DEAD), "resolve"),
+    (make_row(status=config.STATUS_MX_ONLY), "no website"),
+    (make_row(status=config.STATUS_BLOCKED), "robots"),
+])
+def test_disqualifying_conditions_are_dropped_with_a_reason(row, fragment):
+    tier, _, reason = assign(row, 55)
+    assert tier == DROPPED
+    assert fragment in reason
+
+
+def test_uncrawled_targets_get_no_tier():
+    """An unfinished crawl must never read as a rejection."""
+    tier, score, reason = assign(make_row(status=config.STATUS_PENDING), 55)
+    assert tier is None and score is None and reason is None
+
+
+def test_aged_out_targets_are_nurtured_not_dropped():
+    tier, _, reason = assign(make_row(status=config.STATUS_AGED_OUT), 55)
+    assert tier == TIER3
+    assert "not fetched" in reason
+
+
+# --- schema ----------------------------------------------------------------
+
+def test_missing_columns_are_added_to_an_existing_database(tmp_path):
+    """A half-enriched database represents hours of lookups; a schema change
+    must not force the user to start over."""
+    path = str(tmp_path / "old.db")
+    legacy = sqlite3.connect(path)
+    legacy.execute("CREATE TABLE targets (target_key TEXT PRIMARY KEY, "
+                   "domain TEXT NOT NULL, email TEXT NOT NULL)")
+    legacy.execute("INSERT INTO targets VALUES ('s.com', 's.com', 'a@s.com')")
+    legacy.commit()
+    legacy.close()
+
+    conn = db.connect(path)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}
+    assert {"a_host", "platform", "tier", "tier_reason"} <= columns
+    assert conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 1
+    conn.close()

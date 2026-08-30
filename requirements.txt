@@ -1,3 +1,6 @@
 openpyxl>=3.1
 dnspython>=2.4
 aiohttp>=3.9
+
+# tests only
+pytest>=7.4

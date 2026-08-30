@@ -76,13 +76,6 @@ CREATE TABLE IF NOT EXISTS targets (
     verified_at       TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_targets_status       ON targets(status);
-CREATE INDEX IF NOT EXISTS idx_targets_dns_checked  ON targets(dns_checked_at);
-CREATE INDEX IF NOT EXISTS idx_targets_http_checked ON targets(http_checked_at);
-CREATE INDEX IF NOT EXISTS idx_targets_dns_resolves ON targets(dns_resolves);
-CREATE INDEX IF NOT EXISTS idx_targets_tier         ON targets(tier);
-CREATE INDEX IF NOT EXISTS idx_targets_domain       ON targets(domain);
-
 -- Which input workbooks have already been ingested, so stage 1 resumes at
 -- file granularity. Re-ingesting is harmless (upsert), just slow.
 CREATE TABLE IF NOT EXISTS ingest_log (
@@ -96,6 +89,17 @@ CREATE TABLE IF NOT EXISTS ingest_log (
 );
 """
 
+# Kept apart from the table definitions and applied last: an index on a column
+# that a migration is about to add would fail on an older database.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_targets_status       ON targets(status);
+CREATE INDEX IF NOT EXISTS idx_targets_dns_checked  ON targets(dns_checked_at);
+CREATE INDEX IF NOT EXISTS idx_targets_http_checked ON targets(http_checked_at);
+CREATE INDEX IF NOT EXISTS idx_targets_dns_resolves ON targets(dns_resolves);
+CREATE INDEX IF NOT EXISTS idx_targets_tier         ON targets(tier);
+CREATE INDEX IF NOT EXISTS idx_targets_domain       ON targets(domain);
+"""
+
 
 def connect(path: str | None = None) -> sqlite3.Connection:
     """Open the database with settings tuned for long batched writes."""
@@ -105,6 +109,7 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
+    conn.executescript(INDEXES)
     return conn
 
 

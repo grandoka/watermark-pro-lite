@@ -122,7 +122,7 @@ UPDATE targets
        dns_error    = :dns_error,
        status       = COALESCE(:status, status),
        dns_checked_at = :checked_at
- WHERE domain = :domain
+ WHERE domain = :domain AND is_freemail = 0
 """
 
 
