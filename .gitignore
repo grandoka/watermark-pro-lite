@@ -6,5 +6,6 @@ out/*.xlsx
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
 scripts_run_rest.sh
 out/*.log
