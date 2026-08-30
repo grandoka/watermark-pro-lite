@@ -1,17 +1,25 @@
 """SQLite access layer.
 
-One table, `targets`, one row per domain. Every stage reads and writes it, so
+One table, `targets`, one row per target. Every stage reads and writes it, so
 the schema is created idempotently and each stage owns a disjoint set of
 columns:
 
     stage 1  identity + classification   (domain .. source_sheet)
-    stage 2  dns_*                       (dns_resolves .. dns_checked_at)
+    stage 2  dns_*/a_host                (dns_resolves .. dns_checked_at)
     stage 3  http_*/platform/signals     (http_status .. http_checked_at)
-    stage 4  score/tier                  (score, tier, drop_reason, scored_at)
+    stage 4  score/tier                  (score, tier, tier_reason, scored_at)
     verify   deliverability API results  (verify_*)
 
 `status` is the one column several stages touch; it always reflects the latest
-thing we learned about the domain.
+thing we learned about the target.
+
+The primary key is `target_key`, which is the domain for a store on its own
+domain and the full email address for a freemail contact. Freemail addresses
+share a handful of domains (26k of the sampled contacts sit on gmail.com
+alone), so keying those by domain would collapse the entire paid-audience
+seed list into one row; keying them by address keeps them. `domain` is a plain
+column and is unique across every row the crawl stages touch, since freemail
+rows never reach them.
 """
 from __future__ import annotations
 
@@ -22,7 +30,8 @@ from . import config
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS targets (
-    domain            TEXT PRIMARY KEY,
+    target_key        TEXT PRIMARY KEY,
+    domain            TEXT NOT NULL,
     email             TEXT NOT NULL,
     local_part        TEXT,
     created           TEXT,
@@ -37,6 +46,7 @@ CREATE TABLE IF NOT EXISTS targets (
     status            TEXT NOT NULL DEFAULT 'pending',
 
     dns_resolves      INTEGER,
+    a_host            TEXT,
     has_mx            INTEGER,
     mx_provider       TEXT,
     dns_error         TEXT,
@@ -58,7 +68,7 @@ CREATE TABLE IF NOT EXISTS targets (
 
     score             INTEGER,
     tier              TEXT,
-    drop_reason       TEXT,
+    tier_reason       TEXT,
     scored_at         TEXT,
 
     verify_status     TEXT,
@@ -71,6 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_targets_dns_checked  ON targets(dns_checked_at);
 CREATE INDEX IF NOT EXISTS idx_targets_http_checked ON targets(http_checked_at);
 CREATE INDEX IF NOT EXISTS idx_targets_dns_resolves ON targets(dns_resolves);
 CREATE INDEX IF NOT EXISTS idx_targets_tier         ON targets(tier);
+CREATE INDEX IF NOT EXISTS idx_targets_domain       ON targets(domain);
 
 -- Which input workbooks have already been ingested, so stage 1 resumes at
 -- file granularity. Re-ingesting is harmless (upsert), just slow.
@@ -93,7 +104,37 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     return conn
+
+
+def _declared_columns() -> list[tuple[str, str]]:
+    """(name, type) for every column of `targets` declared in SCHEMA."""
+    body = SCHEMA.split("CREATE TABLE IF NOT EXISTS targets (", 1)[1].split(");", 1)[0]
+    columns = []
+    for line in body.splitlines():
+        line = line.strip().rstrip(",")
+        if not line or line.startswith("--"):
+            continue
+        name, _, rest = line.partition(" ")
+        columns.append((name, rest.strip()))
+    return columns
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring an older database up to the current schema.
+
+    A run can span hours, so a half-enriched database has real value and must
+    survive a schema change. CREATE TABLE IF NOT EXISTS silently ignores new
+    columns, so add them here rather than making the user start over.
+    """
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}
+    for name, decl in _declared_columns():
+        if name not in existing:
+            # NOT NULL/PRIMARY KEY only ever apply to stage 1 columns, which
+            # exist from the first run; added columns are always nullable.
+            conn.execute(f"ALTER TABLE targets ADD COLUMN {name} {decl}")
+    conn.commit()
 
 
 def count(conn: sqlite3.Connection, where: str = "", params: Iterable = ()) -> int:

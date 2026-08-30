@@ -10,7 +10,10 @@ scanned with an email regex, and the `created` value for a row is whatever
 datetime cell that row happens to carry (none, for the headerless sheets).
 
 Deduplication is by domain, not by email -- several contacts at one store are
-one target -- keeping the row with the most recent `created` date.
+one target -- keeping the row with the most recent `created` date. Freemail
+contacts are the exception: they are keyed by full address, because a freemail
+domain is a mailbox provider rather than a store and collapsing them by domain
+would throw away the whole paid-audience seed list.
 
     python -m pipeline.stage1_ingest [--limit N] [--force] [--data-dir DIR]
 """
@@ -96,55 +99,55 @@ def _is_header(row) -> bool:
 # --- classification --------------------------------------------------------
 
 def classify(email: str) -> dict:
+    """Split an address into the identity + flags one target row carries."""
     local, domain = email.split("@", 1)
     tld = domain.rsplit(".", 1)[-1]
+    freemail = config.is_freemail_domain(domain)
     return {
+        # A freemail contact is keyed by address: the domain belongs to the
+        # mailbox provider, not to a store, so it is not a target on its own.
+        "target_key": email if freemail else domain,
         "domain": domain,
         "email": email,
         "local_part": local,
-        "is_freemail": int(config.is_freemail_domain(domain)),
+        "is_freemail": int(freemail),
         "is_role": int(local in config.ROLE_LOCALS),
         "tld": tld,
         "jurisdiction": config.jurisdiction_for_tld(tld),
+        # Freemail rows have no store site to crawl, so they bypass stages 2
+        # and 3 and go straight to the ads tier.
+        "status": config.STATUS_FREEMAIL if freemail else config.STATUS_PENDING,
     }
 
 
 # --- upsert ----------------------------------------------------------------
 
-# Keeps the most recent contact per domain. A row with a date always beats a
-# row without one; enrichment columns written by later stages are never
-# touched here, so stage 1 can be re-run at any point.
-UPSERT = """
-INSERT INTO targets (domain, email, local_part, created, created_year, email_count,
-                     is_freemail, is_role, tld, jurisdiction, source_file, source_sheet,
-                     status)
-VALUES (:domain, :email, :local_part, :created, :created_year, 1,
-        :is_freemail, :is_role, :tld, :jurisdiction, :source_file, :source_sheet,
-        'pending')
-ON CONFLICT(domain) DO UPDATE SET
-    email        = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.email ELSE targets.email END,
-    local_part   = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.local_part ELSE targets.local_part END,
-    is_role      = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.is_role ELSE targets.is_role END,
-    source_file  = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.source_file ELSE targets.source_file END,
-    source_sheet = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.source_sheet ELSE targets.source_sheet END,
-    created_year = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.created_year ELSE targets.created_year END,
-    created      = CASE WHEN excluded.created IS NOT NULL
-                         AND (targets.created IS NULL OR excluded.created > targets.created)
-                        THEN excluded.created ELSE targets.created END,
-    email_count  = targets.email_count + 1
-"""
+# Keeps the most recent contact per target. A row with a date always beats a
+# row without one; enrichment columns written by later stages are never touched
+# here, so stage 1 can be re-run at any point.
+_NEWER = ("excluded.created IS NOT NULL AND "
+          "(targets.created IS NULL OR excluded.created > targets.created)")
+
+# Columns describing *which* contact represents the target; they all move
+# together to whichever row turns out to be the most recent one.
+_CONTACT_COLUMNS = ["email", "local_part", "is_role", "created", "created_year",
+                    "source_file", "source_sheet"]
+
+_INSERT_COLUMNS = ["target_key", "domain", "email", "local_part", "created",
+                   "created_year", "is_freemail", "is_role", "tld",
+                   "jurisdiction", "source_file", "source_sheet", "status"]
+
+UPSERT = (
+    "INSERT INTO targets ({cols}, email_count) VALUES ({binds}, 1) "
+    "ON CONFLICT(target_key) DO UPDATE SET {carry}, "
+    "email_count = targets.email_count + 1"
+).format(
+    cols=", ".join(_INSERT_COLUMNS),
+    binds=", ".join(f":{c}" for c in _INSERT_COLUMNS),
+    carry=", ".join(
+        f"{c} = CASE WHEN {_NEWER} THEN excluded.{c} ELSE targets.{c} END"
+        for c in _CONTACT_COLUMNS),
+)
 
 
 def ingest_file(conn, path: str, limit: int | None) -> dict:
@@ -212,33 +215,38 @@ def already_ingested(conn, path: str) -> bool:
 
 def print_summary(conn) -> None:
     total = db.count(conn)
-    heading(f"Stage 1 summary -- {total:,} unique domains in targets")
+    stores = conn.execute(
+        "SELECT COUNT(*) FROM targets WHERE is_freemail = 0").fetchone()[0]
+    freemail = total - stores
+    heading(f"Stage 1 summary -- {total:,} targets "
+            f"({stores:,} store domains + {freemail:,} freemail addresses)")
 
     print("\nBy jurisdiction:")
     print(table([(k, f"{n:,}", f"{100*n/total:.1f}%")
                  for k, n in db.summarize(conn, "jurisdiction")],
-                ["jurisdiction", "domains", "share"]))
+                ["jurisdiction", "targets", "share"]))
 
     print("\nFreemail vs. own domain:")
-    print(table([("freemail" if k else "own domain", f"{n:,}", f"{100*n/total:.1f}%")
+    print(table([("freemail address" if k else "own store domain",
+                  f"{n:,}", f"{100*n/total:.1f}%")
                  for k, n in db.summarize(conn, "is_freemail")],
-                ["kind", "domains", "share"]))
+                ["kind", "targets", "share"]))
 
     print("\nRole vs. personal local part:")
     print(table([("role inbox" if k else "personal/other", f"{n:,}", f"{100*n/total:.1f}%")
                  for k, n in db.summarize(conn, "is_role")],
-                ["kind", "domains", "share"]))
+                ["kind", "targets", "share"]))
 
     print("\nBy created_year:")
     years = sorted(db.summarize(conn, "created_year"),
                    key=lambda r: (r[0] is None, r[0]))
     print(table([("unknown" if k is None else k, f"{n:,}", f"{100*n/total:.1f}%")
                  for k, n in years],
-                ["created_year", "domains", "share"]))
+                ["created_year", "targets", "share"]))
 
     print("\nTop 20 TLDs:")
     print(table([(k, f"{n:,}") for k, n in db.summarize(conn, "tld")[:20]],
-                ["tld", "domains"]))
+                ["tld", "targets"]))
 
 
 def main(argv=None) -> int:
@@ -258,7 +266,7 @@ def main(argv=None) -> int:
         print(f"  reading {os.path.basename(path)} ...")
         stats = ingest_file(conn, path, args.limit)
         print(f"    {stats['rows']:,} email hits, {stats['emails']:,} unique emails, "
-              f"{stats['dupe_emails']:,} repeats, +{stats['domains_new']:,} new domains "
+              f"{stats['dupe_emails']:,} repeats, +{stats['domains_new']:,} new targets "
               f"in {stats['seconds']:.1f}s")
         record_ingest(conn, path, stats)
 

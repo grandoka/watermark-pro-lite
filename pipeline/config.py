@@ -175,7 +175,13 @@ MAX_BODY_BYTES = 200 * 1024
 # --- statuses --------------------------------------------------------------
 
 STATUS_PENDING = "pending"
+# Freemail contacts have no store site of their own to check, so they never
+# enter the DNS/HTTP stages -- they exist only as paid-audience seeds.
+STATUS_FREEMAIL = "freemail"
 STATUS_DEAD = "dead"
 STATUS_LIVE = "live"
 STATUS_PARKED = "parked"
 STATUS_ERROR = "error"
+# Mail exchanger but no A record: reachable by email, but there is no site to
+# fingerprint, so it can never be qualified as a live store.
+STATUS_MX_ONLY = "mx_only"
