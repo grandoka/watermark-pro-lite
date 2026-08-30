@@ -103,21 +103,48 @@ def jurisdiction_for_tld(tld: str) -> str:
 
 # --- platform fingerprints -------------------------------------------------
 
-# (platform, [html needles], [(header, needle) pairs]). Checked in order, so
-# the more specific fingerprints come first.
+# (platform, body regex, header predicates). Checked in order, so the more
+# specific fingerprints come first. Regexes rather than substrings because
+# naive needles misfire badly -- a bare "mage/" matches every "image/..." URL
+# on the page, and "wix.com" matches any site merely linking to Wix.
 PLATFORM_SIGNATURES = [
-    ("Shopify", ["cdn.shopify.com", "/cdn/shop/", "shopify.theme", "myshopify.com"],
-     [("x-shopid", ""), ("x-shopify-stage", ""), ("powered-by", "shopify")]),
-    ("WooCommerce", ["wp-content/plugins/woocommerce", "woocommerce-page",
-                     "woocommerce-js", "wc-add-to-cart"], []),
-    ("BigCommerce", ["cdn11.bigcommerce.com", "bigcommerce.com/s-", "bigcommerce.com/shared"],
-     [("x-bc-", "")]),
-    ("Magento", ["magento_", "/static/version", "mage/", "magento-init"], []),
-    ("PrestaShop", ["prestashop", "/modules/ps_"], [("powered-by", "prestashop")]),
-    ("Wix", ["_wixcssvars", "wix.com", "wixstatic.com"], [("x-wix-request-id", "")]),
-    ("Squarespace", ["squarespace.com", "static1.squarespace.com"],
+    ("Shopify",
+     re.compile(r"cdn\.shopify\.com|/cdn/shop/|Shopify\.theme|\.myshopify\.com"
+                r"|shopify-features|/cdn/shopifycloud/", re.I),
+     [("x-shopid", None), ("x-shopify-stage", None), ("powered-by", "shopify")]),
+
+    ("WooCommerce",
+     re.compile(r"wp-content/plugins/woocommerce|woocommerce-page|woocommerce-js"
+                r"|wc-add-to-cart|wc-ajax=|class=\"[^\"]*woocommerce", re.I),
+     []),
+
+    ("BigCommerce",
+     re.compile(r"cdn11\.bigcommerce\.com|bigcommerce\.com/s-|bigcommerce\.com/shared"
+                r"|stencil-utils", re.I),
+     [("x-bc-", None)]),
+
+    ("Magento",
+     re.compile(r"Magento_|/static/version\d|data-mage-init|mage/cookies|mage-init"
+                r"|/pub/static/frontend/|Mage\.Cookies", re.I),
+     [("x-magento-", None)]),
+
+    ("PrestaShop",
+     re.compile(r"prestashop|/modules/ps_|var prestashop", re.I),
+     [("powered-by", "prestashop")]),
+
+    ("Wix",
+     re.compile(r"_wixCssVars|static\.parastorage\.com|wixstatic\.com"
+                r"|wix-(?:dropdown|image|code)|X-Wix-", re.I),
+     [("x-wix-request-id", None), ("x-wix-", None)]),
+
+    ("Squarespace",
+     re.compile(r"static1\.squarespace\.com|squarespace\.com/universal"
+                r"|Squarespace\.afterBodyLoad|assets\.squarespace\.com", re.I),
      [("x-servedby", "squarespace")]),
-    ("OpenCart", ["catalog/view/theme", "index.php?route=common"], []),
+
+    ("OpenCart",
+     re.compile(r"catalog/view/theme|index\.php\?route=common|route=checkout/cart", re.I),
+     []),
 ]
 
 # Platforms our product fits best; drives the biggest scoring weight.
@@ -185,3 +212,7 @@ STATUS_ERROR = "error"
 # Mail exchanger but no A record: reachable by email, but there is no site to
 # fingerprint, so it can never be qualified as a live store.
 STATUS_MX_ONLY = "mx_only"
+# robots.txt forbids the site root, so we never fetched it.
+STATUS_BLOCKED = "blocked"
+# Older than --min-year: deliberately not crawled, held for the nurture tier.
+STATUS_AGED_OUT = "aged_out"

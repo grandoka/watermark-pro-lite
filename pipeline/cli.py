@@ -22,19 +22,25 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     return p
 
 
+_NUMERIC = set("0123456789,.%-+ ")
+
+
 def table(rows, headers) -> str:
-    """Render a small aligned text table."""
+    """Render a small aligned text table, right-aligning numeric columns."""
     rows = [[("" if c is None else str(c)) for c in r] for r in rows]
     headers = [str(h) for h in headers]
     widths = [len(h) for h in headers]
     for r in rows:
         for i, c in enumerate(r):
             widths[i] = max(widths[i], len(c))
-    line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-    out = [line, "  ".join("-" * w for w in widths)]
+    numeric = [all(set(r[i]) <= _NUMERIC and r[i] for r in rows) if rows else False
+               for i in range(len(headers))]
+    out = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)),
+           "  ".join("-" * w for w in widths)]
     for r in rows:
         out.append("  ".join(
-            c.rjust(widths[i]) if i else c.ljust(widths[i]) for i, c in enumerate(r)))
+            c.rjust(widths[i]) if numeric[i] else c.ljust(widths[i])
+            for i, c in enumerate(r)))
     return "\n".join(out)
 
 

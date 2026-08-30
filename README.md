@@ -55,6 +55,67 @@ Emails are lowercased, stripped and validated, then **deduplicated by domain**
 Each domain is flagged with `is_freemail`, `is_role`, `tld`, `created_year`
 and `jurisdiction` (`EU` / `CASL` / `PECR` / `PERMISSIVE` / `OTHER`).
 
+## Stage 2 -- DNS
+
+Resolves A and MX for every store domain with `dnspython` over asyncio. It runs
+before any HTTP work because it is the cheapest filter there is: one UDP round
+trip removes a large slice of a scraped list, and crawling a domain that does
+not resolve is pure waste. Only transient failures are retried -- NXDOMAIN is
+an answer, not an error. When the apex has no A record the `www` host is tried,
+so www-only stores are not written off as dead, and the hostname that answered
+is recorded for stage 3.
+
+Outcomes: `dead` (nothing resolves), `mx_only` (mail but no website), or
+onwards to stage 3.
+
+## Stage 3 -- fetch and fingerprint
+
+One request per resolvable domain, streaming **at most 200KB** of the body --
+enough for a platform fingerprint, and flat in memory across hundreds of
+thousands of domains. Tries `https://`, then `http://`, then `https://www.`;
+retries once on timeout, never on a 4xx. Certificates are verified, so a store
+with a broken cert falls back to http rather than being silently accepted.
+
+`robots.txt` is fetched once per domain and the root is skipped when it is
+disallowed. A 4xx there means no rules and full access; an explicit 5xx is
+treated as a refusal.
+
+Detects Shopify, WooCommerce, BigCommerce, Magento, PrestaShop, Wix,
+Squarespace and OpenCart from body and header signatures, plus `has_cart`,
+`has_product_schema`, `is_parked` and `lang`.
+
+By default contacts older than `--min-year` (2020) are **not crawled**; they
+are held for the nurture tier, which roughly halves the run.
+
+### Concurrency
+
+The default of 50, with one connection per host, is not just politeness -- it
+is what the network can actually sustain. Raising it to 200 in testing made
+574 of 600 fetches time out, which would have recorded live stores as dead.
+Raise it only after checking that the timeout rate stays low.
+
+## Stage 4 -- score and tier
+
+Each live domain scores 0-100:
+
+| Signal | Weight |
+|---|---|
+| reached a 200 | +5 |
+| Shopify / WooCommerce | +35 |
+| BigCommerce / Magento / PrestaShop / OpenCart | +22 |
+| Wix / Squarespace | +10 |
+| `has_cart` | +12 |
+| `has_product_schema` | +13 |
+| created 2024+ / 2022-23 / 2020-21 | +15 / +12 / +6 |
+| `has_mx` | +15 |
+| responds in under 2s | +5 |
+| `is_role` | -5 |
+
+Parked pages, a missing cart and any non-200 response are disqualifying.
+Targets the earlier stages have not reached yet get **no** tier and appear in
+no workbook -- "we have not looked" is not the same as "we looked and it was
+bad".
+
 ## Outreach policy
 
 * **tier 1** is the only tier that gets cold email.
