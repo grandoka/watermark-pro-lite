@@ -6,13 +6,17 @@ is pinned down.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import sqlite3
 
+import dns.exception
+import dns.resolver
 import pytest
 
 from pipeline import config, db
 from pipeline.stage1_ingest import classify, clean_email, row_created, _is_header
+from pipeline.stage2_dns import check_domain
 from pipeline.stage3_http import (candidate_urls, detect_platform, extract_title,
                                   fingerprint)
 from pipeline.stage4_score import (DROPPED, TIER1, TIER2, TIER3, assign,
@@ -357,3 +361,81 @@ def test_uncrawled_targets_are_not_given_a_score():
     """A score built from absent signals would look like a judgement."""
     for status in (config.STATUS_AGED_OUT, config.STATUS_FREEMAIL):
         assert assign(make_row(status=status), 55)[1] == 0
+
+
+# --- stage 2: a timeout is not an answer -----------------------------------
+
+class FakeAnswer(list):
+    pass
+
+
+class FakeRecord:
+    def __init__(self, exchange, preference):
+        self.exchange, self.preference = exchange, preference
+
+
+class FakeResolver:
+    """Resolver whose answers are scripted per (name, rdtype)."""
+
+    def __init__(self, script):
+        self.script = script
+
+    async def resolve(self, name, rdtype):
+        outcome = self.script.get((name, rdtype), dns.resolver.NXDOMAIN())
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+async def check(script, domain="store.com"):
+    return await check_domain(FakeResolver(script), domain, retries=0)
+
+
+def test_dns_timeout_is_not_recorded_as_a_dead_domain():
+    """The failure mode that deleted 26k real stores from a run: a saturated
+    resolver times out, and every timeout gets written down as 'dead'."""
+    result = asyncio.run(check({
+        ("store.com", "A"): dns.exception.Timeout(),
+        ("store.com", "MX"): dns.exception.Timeout(),
+    }))
+    assert result["inconclusive"] is True
+
+
+def test_an_authoritative_nxdomain_is_conclusive():
+    result = asyncio.run(check({}))  # everything NXDOMAINs
+    assert result["inconclusive"] is False
+    assert result["status"] == config.STATUS_DEAD
+    assert result["dns_resolves"] == 0
+
+
+def test_a_resolving_domain_is_conclusive_even_if_mx_timed_out():
+    result = asyncio.run(check({
+        ("store.com", "A"): FakeAnswer(["1.2.3.4"]),
+        ("store.com", "MX"): dns.exception.Timeout(),
+    }))
+    assert result["inconclusive"] is False
+    assert result["dns_resolves"] == 1
+
+
+def test_mx_only_domain_has_no_website():
+    result = asyncio.run(check({
+        ("store.com", "MX"): FakeAnswer([FakeRecord("mx.mail.com.", 10)]),
+    }))
+    assert result["status"] == config.STATUS_MX_ONLY
+    assert result["mx_provider"] == "mx.mail.com"
+
+
+def test_lowest_preference_mx_wins():
+    result = asyncio.run(check({
+        ("store.com", "MX"): FakeAnswer([FakeRecord("backup.mail.com.", 50),
+                                         FakeRecord("primary.mail.com.", 10)]),
+    }))
+    assert result["mx_provider"] == "primary.mail.com"
+
+
+def test_www_fallback_rescues_a_www_only_store():
+    result = asyncio.run(check({
+        ("www.store.com", "A"): FakeAnswer(["1.2.3.4"]),
+    }))
+    assert result["dns_resolves"] == 1
+    assert result["a_host"] == "www.store.com"

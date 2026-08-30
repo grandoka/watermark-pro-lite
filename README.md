@@ -81,6 +81,19 @@ is recorded for stage 3.
 Outcomes: `dead` (nothing resolves), `mx_only` (mail but no website), or
 onwards to stage 3.
 
+**A timeout is not an answer.** When neither query comes back with anything --
+no records and no authoritative "no such name" -- the domain is left
+unresolved for a later pass instead of being written down as dead, and
+`dns_attempts` is incremented so an unreachable domain is still given up on
+after `--max-attempts` runs. This matters: a first run at concurrency 600
+timed out on half its queries and recorded 26,000 real stores as dead. If the
+summary reports a large "never answered" residue, the concurrency is too high
+for the network path.
+
+Throughput is bounded by the network, not by the concurrency setting. On the
+path used here it flattens at ~12.5 domains/s from concurrency 100 upward;
+going higher only converts real answers into timeouts.
+
 ## Stage 3 -- fetch and fingerprint
 
 One request per resolvable domain, streaming **at most 200KB** of the body --

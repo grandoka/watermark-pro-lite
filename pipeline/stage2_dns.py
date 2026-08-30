@@ -37,6 +37,9 @@ def parse_args(argv=None):
                    help="per-query timeout in seconds (default: %(default)s)")
     p.add_argument("--retries", type=int, default=2,
                    help="retries after a transient failure (default: %(default)s)")
+    p.add_argument("--max-attempts", type=int, default=3,
+                   help="give up on a domain that never answers after this "
+                        "many runs (default: %(default)s)")
     p.add_argument("--nameservers", default=None,
                    help="comma-separated resolvers to use instead of the system ones")
     return p.parse_args(argv)
@@ -94,6 +97,14 @@ async def check_domain(resolver, domain: str, retries: int) -> dict:
 
     resolves = bool(a_answer)
     has_mx = bool(mx_answer)
+    error = "; ".join(e for e in (a_err, mx_err) if e) or None
+
+    # A lookup that timed out is not an answer. If neither query came back
+    # with anything -- no records *and* no authoritative "no such name" -- we
+    # simply did not get to ask, and recording that as a dead domain would
+    # silently delete a real store from the list. Leave it for another pass.
+    inconclusive = bool(error) and not resolves and not has_mx
+
     if resolves:
         status = None  # stage 3 decides; leave whatever status it has
     elif has_mx:
@@ -101,7 +112,6 @@ async def check_domain(resolver, domain: str, retries: int) -> dict:
     else:
         status = config.STATUS_DEAD
 
-    error = "; ".join(e for e in (a_err, mx_err) if e) or None
     return {
         "domain": domain,
         "dns_resolves": int(resolves),
@@ -110,6 +120,7 @@ async def check_domain(resolver, domain: str, retries: int) -> dict:
         "mx_provider": mx_provider,
         "dns_error": error,
         "status": status,
+        "inconclusive": inconclusive,
     }
 
 
@@ -120,8 +131,25 @@ UPDATE targets
        has_mx       = :has_mx,
        mx_provider  = :mx_provider,
        dns_error    = :dns_error,
+       dns_attempts = dns_attempts + 1,
        status       = COALESCE(:status, status),
        dns_checked_at = :checked_at
+ WHERE domain = :domain AND is_freemail = 0
+"""
+
+# Nothing came back at all. Count the attempt but leave dns_checked_at unset so
+# the next run picks the domain up again -- unless we have now tried
+# --max-attempts times, at which point unreachable is the honest answer.
+UPDATE_INCONCLUSIVE = """
+UPDATE targets
+   SET dns_error    = :dns_error,
+       dns_attempts = dns_attempts + 1,
+       dns_resolves = CASE WHEN dns_attempts + 1 >= :max_attempts THEN 0 END,
+       has_mx       = CASE WHEN dns_attempts + 1 >= :max_attempts THEN 0 END,
+       status       = CASE WHEN dns_attempts + 1 >= :max_attempts
+                           THEN :dead_status ELSE status END,
+       dns_checked_at = CASE WHEN dns_attempts + 1 >= :max_attempts
+                             THEN :checked_at END
  WHERE domain = :domain AND is_freemail = 0
 """
 
@@ -151,7 +179,12 @@ async def run(conn, domains: list[str], args) -> None:
         if not buffer:
             return
         rows, buffer[:] = list(buffer), []
-        conn.executemany(UPDATE, rows)
+        settled = [r for r in rows if not r["inconclusive"]]
+        unsettled = [r for r in rows if r["inconclusive"]]
+        if settled:
+            conn.executemany(UPDATE, settled)
+        if unsettled:
+            conn.executemany(UPDATE_INCONCLUSIVE, unsettled)
         conn.commit()
 
     async def worker() -> None:
@@ -166,8 +199,11 @@ async def run(conn, domains: list[str], args) -> None:
                 result = {"domain": domain, "dns_resolves": 0, "a_host": None,
                           "has_mx": 0, "mx_provider": None,
                           "dns_error": f"worker:{type(exc).__name__}",
-                          "status": config.STATUS_DEAD}
-            result["checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+                          "status": config.STATUS_DEAD, "inconclusive": True}
+            result["checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat(
+                timespec="seconds")
+            result["max_attempts"] = args.max_attempts
+            result["dead_status"] = config.STATUS_DEAD
             async with lock:
                 buffer.append(result)
                 if len(buffer) >= BATCH:
@@ -204,6 +240,14 @@ def print_summary(conn) -> None:
         print("\nTop MX hosts:")
         print(table([(r["mx_provider"], f"{r['n']:,}") for r in providers],
                     ["mx host", "domains"]))
+
+    retryable = db.count(conn, "is_freemail = 0 AND dns_checked_at IS NULL "
+                               "AND dns_attempts > 0")
+    if retryable:
+        print(f"\n{retryable:,} domains never answered and were left unresolved "
+              f"rather than written off as dead. Re-run this stage to retry them; "
+              f"a high number here means the concurrency is too high for the "
+              f"network path, not that the domains are gone.")
 
     remaining = db.count(conn, "is_freemail = 0 AND dns_checked_at IS NULL")
     print(f"\n{remaining:,} domains still unchecked; "

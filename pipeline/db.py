@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS targets (
     has_mx            INTEGER,
     mx_provider       TEXT,
     dns_error         TEXT,
+    dns_attempts      INTEGER NOT NULL DEFAULT 0,
     dns_checked_at    TEXT,
 
     http_status       INTEGER,
