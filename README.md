@@ -129,6 +129,20 @@ Targets the earlier stages have not reached yet get **no** tier and appear in
 no workbook -- "we have not looked" is not the same as "we looked and it was
 bad".
 
+### Tiering order
+
+Tiering is a compliance split before it is a quality one. Anything that may
+never be cold-emailed goes to tier 2 whatever it scores, so **tier 3 contains
+only targets that could legally be emailed later** -- otherwise a low-scoring
+German store would sit in the nurture pile until someone decided to "email the
+nurture list".
+
+1. not reached by the earlier stages -> no tier, no workbook
+2. dead, parked, non-200, or no cart -> `dropped.xlsx`
+3. freemail, EU/CASL/other jurisdiction, or no MX -> `tier2_ads.xlsx`
+4. not crawled (older than the cutoff), or below `--min-score` -> `tier3_nurture.xlsx`
+5. everything left -> `tier1_email.xlsx`
+
 ## Outreach policy
 
 * **tier 1** is the only tier that gets cold email.

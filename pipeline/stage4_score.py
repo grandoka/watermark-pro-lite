@@ -120,36 +120,39 @@ def disqualify(row) -> str | None:
 def assign(row, min_score: int) -> tuple[str | None, int | None, str | None]:
     """Return (tier, score, reason) for one target.
 
-    A target the earlier stages have not reached yet gets no tier at all --
-    it is unknown, not rejected, and putting it in dropped.xlsx would quietly
-    turn "we have not looked" into "we looked and it was bad".
+    Order matters, and it is a compliance order before it is a quality one.
+    Anything that may never be cold-emailed lands in tier 2 regardless of how
+    good it looks, so tier 3 holds only targets that *could* legally be emailed
+    later. Otherwise a low-scoring German store would sit in the nurture pile,
+    and the day someone decides to "email the nurture list" it becomes a GDPR
+    problem.
     """
     if row["status"] == config.STATUS_PENDING:
+        # Not reached by the earlier stages yet: unknown, not rejected. Giving
+        # it a tier would turn "we have not looked" into "we looked and it was
+        # bad".
         return None, None, None
-
-    if row["status"] == config.STATUS_FREEMAIL:
-        # No store site to judge, so no score -- these exist purely as seed
-        # addresses for lookalike audiences.
-        return TIER2, 0, "freemail contact: ads audience only, never email"
-
-    if row["status"] == config.STATUS_AGED_OUT:
-        return TIER3, 0, "contact predates the crawl cutoff; not fetched"
 
     reason = disqualify(row)
     if reason:
         return DROPPED, 0, reason
 
-    score = score_row(row)
-    if score < min_score:
-        return TIER3, score, f"live but scores {score} (below {min_score})"
+    # Only a live 200 response carries the signals the score is built from;
+    # anything else would produce a confident-looking number from nothing.
+    score = score_row(row) if row["status"] == config.STATUS_LIVE else 0
 
-    if row["is_freemail"]:
+    if row["status"] == config.STATUS_FREEMAIL or row["is_freemail"]:
         return TIER2, score, "freemail contact: ads audience only, never email"
     if row["jurisdiction"] not in config.EMAILABLE_JURISDICTIONS:
         return TIER2, score, (f"{row['jurisdiction']} jurisdiction: "
                               "ads audience only, no cold email")
     if not row["has_mx"]:
         return TIER2, score, "no MX record: cannot be emailed, ads audience only"
+
+    if row["status"] == config.STATUS_AGED_OUT:
+        return TIER3, score, "contact predates the crawl cutoff; not fetched"
+    if score < min_score:
+        return TIER3, score, f"live but scores {score} (below {min_score})"
     return TIER1, score, "cleared for cold email"
 
 

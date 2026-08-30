@@ -332,3 +332,28 @@ def test_missing_columns_are_added_to_an_existing_database(tmp_path):
     assert {"a_host", "platform", "tier", "tier_reason"} <= columns
     assert conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 1
     conn.close()
+
+
+def test_tier3_never_contains_a_target_that_cannot_be_emailed():
+    """Tier 3 is a holding pen for future email, so nothing that may never be
+    emailed is allowed to sit in it."""
+    weak = dict(platform=None, has_product_schema=0, created_year=2016,
+                response_time_ms=8000)
+    assert assign(make_row(**weak), 55)[0] == TIER3          # permissive: fine
+    assert assign(make_row(jurisdiction="EU", **weak), 55)[0] == TIER2
+    assert assign(make_row(jurisdiction="CASL", **weak), 55)[0] == TIER2
+    assert assign(make_row(is_freemail=1, **weak), 55)[0] == TIER2
+    assert assign(make_row(has_mx=0, **weak), 55)[0] == TIER2
+
+
+def test_an_aged_out_eu_contact_is_ads_only_not_nurture():
+    tier, _, reason = assign(
+        make_row(status=config.STATUS_AGED_OUT, jurisdiction="EU"), 55)
+    assert tier == TIER2
+    assert "no cold email" in reason
+
+
+def test_uncrawled_targets_are_not_given_a_score():
+    """A score built from absent signals would look like a judgement."""
+    for status in (config.STATUS_AGED_OUT, config.STATUS_FREEMAIL):
+        assert assign(make_row(status=status), 55)[1] == 0
