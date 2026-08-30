@@ -1,0 +1,181 @@
+"""Shared constants, regexes and classification rules.
+
+Everything here is data, not behaviour, so the stages stay readable and the
+classification rules are reviewable in one place.
+"""
+from __future__ import annotations
+
+import os
+import re
+
+# --- paths -----------------------------------------------------------------
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.environ.get("PIPELINE_DATA_DIR", os.path.join(ROOT, "data"))
+OUT_DIR = os.environ.get("PIPELINE_OUT_DIR", os.path.join(ROOT, "out"))
+DB_PATH = os.environ.get("PIPELINE_DB", os.path.join(ROOT, "targets.db"))
+
+# --- email parsing ---------------------------------------------------------
+
+# Liberal scanner: pulls candidates out of arbitrary cell text. Source cells
+# hold things like "a@b.com:info@b.com" and "mailto:info@b.com", so we scan
+# rather than match the whole cell.
+EMAIL_SCAN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+# Strict validator, applied after lowercasing/stripping.
+EMAIL_VALID = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$")
+
+# --- freemail --------------------------------------------------------------
+
+# Exact domains.
+FREEMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com",
+    "yahoo.com", "ymail.com", "rocketmail.com",
+    "hotmail.com", "live.com", "msn.com",
+    "outlook.com",
+    "icloud.com", "me.com", "mac.com",
+    "aol.com",
+    "web.de",
+    "mail.ru", "inbox.ru", "bk.ru", "list.ru", "internet.ru",
+    "proton.me", "protonmail.com", "protonmail.ch", "pm.me",
+    "orange.fr", "wanadoo.fr",
+    "free.fr",
+    "libero.it",
+    "t-online.de",
+}
+
+# Brands that run many ccTLD variants (gmx.de/gmx.net/..., yandex.ru/.com/...,
+# yahoo.co.uk, hotmail.fr, outlook.de and so on). Matched on the first label
+# plus, for the well-known ones, any country suffix.
+FREEMAIL_BRANDS = (
+    "gmx", "yandex", "yahoo", "hotmail", "outlook", "live", "aol", "laposte",
+)
+
+
+def is_freemail_domain(domain: str) -> bool:
+    """True when the domain is a consumer mailbox provider, not a store."""
+    if domain in FREEMAIL_DOMAINS:
+        return True
+    first = domain.split(".", 1)[0]
+    if first in FREEMAIL_BRANDS and domain.count(".") <= 2:
+        return True
+    return False
+
+
+# --- role accounts ---------------------------------------------------------
+
+ROLE_LOCALS = {
+    "info", "contact", "sales", "support", "hello", "office", "admin",
+    "kontakt", "contacto", "mail", "enquiries", "service", "post", "shop",
+    "orders", "contato", "ventas", "hola", "comercial", "marketing",
+}
+
+# --- jurisdiction ----------------------------------------------------------
+
+EU_TLDS = {
+    "at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr",
+    "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk",
+    "si", "es", "se", "eu",
+}
+CASL_TLDS = {"ca"}
+PECR_TLDS = {"uk"}
+PERMISSIVE_TLDS = {"com", "net", "org", "us", "au", "nz", "shop", "store", "co"}
+
+EMAILABLE_JURISDICTIONS = {"PERMISSIVE", "PECR"}
+
+
+def jurisdiction_for_tld(tld: str) -> str:
+    """Map a TLD to the outreach regime that governs cold email to it.
+
+    Uses the last label, which keeps multi-part suffixes correct:
+    .com.au -> au -> PERMISSIVE, .co.uk -> uk -> PECR.
+    """
+    if tld in EU_TLDS:
+        return "EU"
+    if tld in CASL_TLDS:
+        return "CASL"
+    if tld in PECR_TLDS:
+        return "PECR"
+    if tld in PERMISSIVE_TLDS:
+        return "PERMISSIVE"
+    return "OTHER"
+
+
+# --- platform fingerprints -------------------------------------------------
+
+# (platform, [html needles], [(header, needle) pairs]). Checked in order, so
+# the more specific fingerprints come first.
+PLATFORM_SIGNATURES = [
+    ("Shopify", ["cdn.shopify.com", "/cdn/shop/", "shopify.theme", "myshopify.com"],
+     [("x-shopid", ""), ("x-shopify-stage", ""), ("powered-by", "shopify")]),
+    ("WooCommerce", ["wp-content/plugins/woocommerce", "woocommerce-page",
+                     "woocommerce-js", "wc-add-to-cart"], []),
+    ("BigCommerce", ["cdn11.bigcommerce.com", "bigcommerce.com/s-", "bigcommerce.com/shared"],
+     [("x-bc-", "")]),
+    ("Magento", ["magento_", "/static/version", "mage/", "magento-init"], []),
+    ("PrestaShop", ["prestashop", "/modules/ps_"], [("powered-by", "prestashop")]),
+    ("Wix", ["_wixcssvars", "wix.com", "wixstatic.com"], [("x-wix-request-id", "")]),
+    ("Squarespace", ["squarespace.com", "static1.squarespace.com"],
+     [("x-servedby", "squarespace")]),
+    ("OpenCart", ["catalog/view/theme", "index.php?route=common"], []),
+]
+
+# Platforms our product fits best; drives the biggest scoring weight.
+PLATFORM_TIERS = {
+    "Shopify": 35,
+    "WooCommerce": 35,
+    "BigCommerce": 22,
+    "Magento": 22,
+    "PrestaShop": 22,
+    "OpenCart": 22,
+    "Wix": 10,
+    "Squarespace": 10,
+}
+
+# --- page signals ----------------------------------------------------------
+
+CART_PATTERNS = [
+    re.compile(r"""(?:href|action)\s*=\s*["'][^"']*/(cart|checkout|basket|panier)\b""", re.I),
+    re.compile(r"""["'](?:/)?(?:cart|checkout|basket|panier)(?:/|["'?#])""", re.I),
+    re.compile(r"add[-_ ]?to[-_ ]?cart", re.I),
+]
+
+PRODUCT_SCHEMA_PATTERNS = [
+    re.compile(r'"@type"\s*:\s*"(?:Product|Offer|AggregateOffer)"', re.I),
+    re.compile(r'"@type"\s*:\s*\[[^\]]*"(?:Product|Offer)"', re.I),
+    re.compile(r'itemtype\s*=\s*["\'][^"\']*schema\.org/(?:Product|Offer)', re.I),
+]
+
+PARKED_PATTERNS = [
+    re.compile(r"\b(this )?domain (is )?(for sale|is available|parked)\b", re.I),
+    re.compile(r"\bbuy this domain\b", re.I),
+    re.compile(r"\bdomain (name )?parking\b", re.I),
+    re.compile(r"\bcoming soon\b.{0,80}\b(domain|website)\b", re.I),
+    re.compile(r"\b(sedoparking|parkingcrew|bodis|afternic|dan\.com|hugedomains|namecheap parking)\b", re.I),
+    re.compile(r"\bunder construction\b", re.I),
+    re.compile(r"\bdefault web site page\b", re.I),
+    re.compile(r"\bapache2? (ubuntu|debian) default page\b", re.I),
+    re.compile(r"\bwelcome to nginx\b", re.I),
+    re.compile(r"\bindex of /\b", re.I),
+]
+
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+HTML_LANG_RE = re.compile(r"<html[^>]*\slang\s*=\s*[\"']?([A-Za-z\-]{2,10})", re.I)
+
+# --- http ------------------------------------------------------------------
+
+CONTACT_URL = os.environ.get("CRAWLER_CONTACT_URL", "https://example.com/crawler")
+USER_AGENT = os.environ.get(
+    "CRAWLER_USER_AGENT",
+    f"watermark-pro-lite-prospector/1.0 (+{CONTACT_URL})",
+)
+
+MAX_BODY_BYTES = 200 * 1024
+
+# --- statuses --------------------------------------------------------------
+
+STATUS_PENDING = "pending"
+STATUS_DEAD = "dead"
+STATUS_LIVE = "live"
+STATUS_PARKED = "parked"
+STATUS_ERROR = "error"
