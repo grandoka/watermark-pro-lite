@@ -157,19 +157,38 @@ UPDATE = ("UPDATE targets SET score = :score, tier = :tier, tier_reason = :reaso
           "scored_at = :scored_at WHERE target_key = :key")
 
 
+SCORE_CHUNK = 5000
+
+
 def score_all(conn, args) -> int:
+    """Score and tier every target, in chunks.
+
+    Reads through a second connection: writing to a table while iterating a
+    cursor over it on the same connection is not safe, and the full four-file
+    set is ~600k rows, which is more than is worth holding in memory at once.
+    """
+    reader = db.connect(args.db)
     sql = "SELECT * FROM targets"
     if args.limit:
         sql += f" LIMIT {int(args.limit)}"
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    updates = []
-    for row in conn.execute(sql):
-        tier, score, reason = assign(row, args.min_score)
-        updates.append({"key": row["target_key"], "tier": tier, "score": score,
-                        "reason": reason, "scored_at": now})
-    conn.executemany(UPDATE, updates)
-    conn.commit()
-    return len(updates)
+
+    cursor = reader.execute(sql)
+    scored = 0
+    while True:
+        rows = cursor.fetchmany(SCORE_CHUNK)
+        if not rows:
+            break
+        updates = []
+        for row in rows:
+            tier, score, reason = assign(row, args.min_score)
+            updates.append({"key": row["target_key"], "tier": tier, "score": score,
+                            "reason": reason, "scored_at": now})
+        conn.executemany(UPDATE, updates)
+        conn.commit()
+        scored += len(updates)
+    reader.close()
+    return scored
 
 
 # --- workbooks -------------------------------------------------------------
