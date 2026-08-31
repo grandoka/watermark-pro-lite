@@ -4,8 +4,9 @@ Stages 1-4 answer "is this a real shop worth contacting". This one answers
 "who do I contact, and what do I say to them", which is what turns a list into
 leads:
 
-  * **Social accounts** -- LinkedIn company and personal profiles, Instagram,
-    Facebook, taken from the footer and header where shops publish them.
+  * **A LinkedIn account** -- personal profile in preference to a company page,
+    taken from wherever the shop publishes it: footer, header, or the
+    legal-notice page, which is scanned for free since it is fetched anyway.
   * **A named human** -- from the legal-notice page. EU e-commerce law requires
     the operator's name on it, so for a European shop this beats LinkedIn
     outright: a family-run shop with no LinkedIn presence at all still has to
@@ -97,32 +98,28 @@ def allowed(parser, url: str) -> bool:
 
 # --- extraction ------------------------------------------------------------
 
-def extract_socials(html: str, base_url: str) -> dict:
-    """Social accounts published on the page, minus share widgets."""
-    found = {}
-    for key, pattern in config.SOCIAL_PATTERNS.items():
+def extract_linkedin(html: str) -> dict:
+    """The shop's LinkedIn account, or nothing.
+
+    A personal profile beats a company page: the pitch goes to a human, and a
+    company page is another hop before you have someone to write to. Patterns
+    are tried in that order.
+    """
+    for kind, pattern in config.LINKEDIN_PATTERNS:
         for handle in pattern.findall(html):
-            slug = handle.strip("/").lower()
-            if not slug or slug in config.SOCIAL_NOISE:
+            slug = handle.strip("/")
+            if not slug or slug.split("/")[0].lower() in config.LINKEDIN_NOISE:
                 continue
-            found.setdefault(key, handle.strip("/"))
-            break
-    out = {"linkedin_url": None, "linkedin_kind": None,
-           "instagram_url": None, "facebook_url": None}
-    # A named person beats a company page: the pitch goes to a human.
-    if "linkedin_person" in found:
-        out["linkedin_url"] = f"https://www.linkedin.com/in/{found['linkedin_person']}"
-        out["linkedin_kind"] = "personal"
-    elif "linkedin_company" in found:
-        out["linkedin_url"] = f"https://www.linkedin.com/company/{found['linkedin_company']}"
-        out["linkedin_kind"] = "company"
-    if "instagram" in found:
-        out["instagram_url"] = f"https://www.instagram.com/{found['instagram']}"
-    if "facebook" in found:
-        out["facebook_url"] = f"https://www.facebook.com/{found['facebook']}"
-    out["social_count"] = sum(1 for v in (out["linkedin_url"], out["instagram_url"],
-                                          out["facebook_url"]) if v)
-    return out
+            if kind == "personal":
+                path = "in" if "/" not in slug else "pub"
+                return {"linkedin_url": f"https://www.linkedin.com/{path}/{slug}",
+                        "linkedin_kind": "personal"}
+            if kind == "company":
+                return {"linkedin_url": f"https://www.linkedin.com/company/{slug}",
+                        "linkedin_kind": "company"}
+            return {"linkedin_url": f"https://lnkd.in/{slug}",
+                    "linkedin_kind": "short"}
+    return {"linkedin_url": None, "linkedin_kind": None}
 
 
 def attrs_of(tag: str) -> dict:
@@ -208,8 +205,7 @@ def extract_owner(html: str) -> str | None:
 
 # --- per-shop work ---------------------------------------------------------
 
-EMPTY = {"linkedin_url": None, "linkedin_kind": None, "instagram_url": None,
-         "facebook_url": None, "social_count": 0, "image_count": None,
+EMPTY = {"linkedin_url": None, "linkedin_kind": None, "image_count": None,
          "images_no_alt": None, "images_lazy": None, "images_srcset": None,
          "images_offsite": None, "images_modern": None, "has_og_image": None,
          "has_meta_desc": None, "sample_image_url": None,
@@ -244,7 +240,7 @@ async def profile(session, row, probe_image: bool) -> dict:
 
     html = home["body"].decode("utf-8", "ignore")
     base = home["final_url"] or start
-    record.update(extract_socials(html, base))
+    record.update(extract_linkedin(html))
     record.update(audit_images(html, base))
     record["legal_url"] = find_legal_url(html, base)
 
@@ -252,9 +248,14 @@ async def profile(session, row, probe_image: bool) -> dict:
     if record["legal_url"] and allowed(parser, record["legal_url"]):
         legal = await fetch(session, record["legal_url"], retry_timeout=False)
         if legal["status"] == 200:
-            name = extract_owner(legal["body"].decode("utf-8", "ignore"))
+            legal_html = legal["body"].decode("utf-8", "ignore")
+            name = extract_owner(legal_html)
             if name:
                 record.update(owner_name=name, owner_source="legal_notice")
+            # The page is already in hand, so scan it for a LinkedIn account
+            # too -- shops that put one nowhere else often put it here.
+            if not record["linkedin_url"]:
+                record.update(extract_linkedin(legal_html))
 
     # Weigh one real product image. HEAD, so nothing is downloaded.
     if probe_image and record["sample_image_url"] and allowed(parser, record["sample_image_url"]):
@@ -389,10 +390,11 @@ def print_summary(conn) -> None:
         ("LinkedIn (any)", db.count(conn, "linkedin_url IS NOT NULL")),
         ("  a named person", db.count(conn, "linkedin_kind = 'personal'")),
         ("  a company page", db.count(conn, "linkedin_kind = 'company'")),
-        ("Instagram", db.count(conn, "instagram_url IS NOT NULL")),
-        ("Facebook", db.count(conn, "facebook_url IS NOT NULL")),
+        ("  an lnkd.in short link", db.count(conn, "linkedin_kind = 'short'")),
         ("legal-notice page found", db.count(conn, "legal_url IS NOT NULL")),
         ("OWNER NAMED", db.count(conn, "owner_name IS NOT NULL")),
+        ("reachable by name (owner or LinkedIn person)",
+         db.count(conn, "owner_name IS NOT NULL OR linkedin_kind = 'personal'")),
     ]
     print(table([(k, f"{n:,}", f"{100*n/done:.1f}%") for k, n in rows],
                 ["contact route", "shops", "share"]))

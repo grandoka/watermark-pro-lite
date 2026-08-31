@@ -76,9 +76,6 @@ CREATE TABLE IF NOT EXISTS targets (
 
     linkedin_url      TEXT,
     linkedin_kind     TEXT,
-    instagram_url     TEXT,
-    facebook_url      TEXT,
-    social_count      INTEGER,
     image_count       INTEGER,
     images_no_alt     INTEGER,
     images_lazy       INTEGER,

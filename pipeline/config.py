@@ -228,26 +228,27 @@ STATUS_AGED_OUT = "aged_out"
 
 # --- stage 5: outreach profiling -------------------------------------------
 
-# Social profiles, from anywhere in the page (footers mostly, sometimes the
-# header). The capture group is the handle/slug, which is what identifies the
-# account -- the surrounding URL varies by locale and tracking parameters.
-SOCIAL_PATTERNS = {
-    "linkedin_company": re.compile(
-        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/company/([A-Za-z0-9_\-.%]+)""", re.I),
-    "linkedin_person": re.compile(
-        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/in/([A-Za-z0-9_\-.%]+)""", re.I),
-    "instagram": re.compile(
-        r"""https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)""", re.I),
-    "facebook": re.compile(
-        r"""https?://(?:[a-z]{2,3}\.)?facebook\.com/([A-Za-z0-9_.\-]+)""", re.I),
-}
+# LinkedIn only. Several URL shapes are in circulation -- the modern
+# /company/ and /in/ paths, the legacy /pub/ profile path, and lnkd.in short
+# links -- and a shop that publishes any of them publishes only one, so all of
+# them have to be recognised.
+LINKEDIN_PATTERNS = [
+    ("personal", re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/in/([A-Za-z0-9_\-.%]+)""", re.I)),
+    ("personal", re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/pub/([A-Za-z0-9_\-.%/]+)""", re.I)),
+    ("company", re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/company/([A-Za-z0-9_\-.%]+)""", re.I)),
+    ("company", re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/(?:showcase|school)/([A-Za-z0-9_\-.%]+)""", re.I)),
+    ("short", re.compile(r"""https?://lnkd\.in/([A-Za-z0-9_\-]+)""", re.I)),
+]
 
-# Facebook and Instagram URLs that are share widgets or platform pages rather
-# than the shop's own account.
-SOCIAL_NOISE = {
-    "sharer", "share", "sharer.php", "dialog", "plugins", "tr", "profile.php",
-    "pages", "groups", "events", "login", "help", "policies", "privacy",
-    "accounts", "explore", "p", "reel", "reels", "legal", "about",
+# Slugs that are LinkedIn's own pages or share widgets rather than an account.
+LINKEDIN_NOISE = {
+    "share", "sharearticle", "shareoffsite", "sharing", "cws", "feed", "login",
+    "signup", "uas", "help", "legal", "company-beta", "search", "jobs",
+    "pulse", "learning", "posts", "groups", "events",
 }
 
 # The legal-notice page. EU e-commerce law requires the operator's name on it,

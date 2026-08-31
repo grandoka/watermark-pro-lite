@@ -884,7 +884,7 @@ def test_the_export_survives_an_illegal_character_in_the_database(tmp_path):
 
 # --- stage 5: outreach profiling -------------------------------------------
 
-from pipeline.stage5_profile import (audit_images, extract_owner, extract_socials,
+from pipeline.stage5_profile import (audit_images, extract_linkedin, extract_owner,
                                      find_legal_url, strip_tags)
 
 FOOTER = """
@@ -896,26 +896,42 @@ FOOTER = """
 </footer>"""
 
 
-def test_social_accounts_are_read_from_the_footer():
-    s = extract_socials(FOOTER, "https://acme.com/")
-    assert s["linkedin_url"] == "https://www.linkedin.com/company/acme-shop"
-    assert s["linkedin_kind"] == "company"
-    assert s["instagram_url"] == "https://www.instagram.com/acmeshop"
-    assert s["social_count"] == 2
+def test_linkedin_is_read_from_the_footer():
+    li = extract_linkedin(FOOTER)
+    assert li["linkedin_url"] == "https://www.linkedin.com/company/acme-shop"
+    assert li["linkedin_kind"] == "company"
 
 
-def test_a_share_widget_is_not_the_shops_facebook_account():
-    """Every shop links facebook.com/sharer.php; almost none of them own it."""
-    assert extract_socials(FOOTER, "https://acme.com/")["facebook_url"] is None
+def test_other_social_networks_are_not_collected():
+    """LinkedIn is the only channel in scope, so nothing else is stored."""
+    assert set(extract_linkedin(FOOTER)) == {"linkedin_url", "linkedin_kind"}
 
 
 def test_a_named_person_beats_a_company_page():
-    """The pitch goes to a human, so prefer /in/ over /company/."""
+    """The pitch goes to a human; a company page is another hop first."""
     html = ('<a href="https://linkedin.com/company/acme">c</a>'
             '<a href="https://linkedin.com/in/jane-doe-123">p</a>')
-    s = extract_socials(html, "https://acme.com/")
-    assert s["linkedin_kind"] == "personal"
-    assert s["linkedin_url"].endswith("/in/jane-doe-123")
+    li = extract_linkedin(html)
+    assert li["linkedin_kind"] == "personal"
+    assert li["linkedin_url"].endswith("/in/jane-doe-123")
+
+
+@pytest.mark.parametrize("href, url, kind", [
+    ("https://de.linkedin.com/in/jane-doe", "https://www.linkedin.com/in/jane-doe", "personal"),
+    ("https://linkedin.com/pub/john-smith/1a/2b", "https://www.linkedin.com/pub/john-smith/1a/2b", "personal"),
+    ("https://linkedin.com/showcase/acme-pro", "https://www.linkedin.com/company/acme-pro", "company"),
+    ("https://lnkd.in/eXaMp1e", "https://lnkd.in/eXaMp1e", "short"),
+])
+def test_the_url_shapes_in_circulation_are_all_recognised(href, url, kind):
+    """A shop publishes one shape and only one, so missing a shape loses the
+    shop entirely."""
+    li = extract_linkedin(f'<a href="{href}">li</a>')
+    assert (li["linkedin_url"], li["linkedin_kind"]) == (url, kind)
+
+
+def test_a_linkedin_share_widget_is_not_an_account():
+    html = '<a href="https://www.linkedin.com/shareArticle?mini=true&url=x">Share</a>'
+    assert extract_linkedin(html)["linkedin_url"] is None
 
 
 def test_legal_page_link_is_found_and_absolutised():
