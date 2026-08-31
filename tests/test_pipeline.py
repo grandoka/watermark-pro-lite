@@ -755,3 +755,23 @@ def test_workbooks_are_sorted_by_descending_score(tmp_path):
     scores = [r[3] for r in book.worksheets[0].iter_rows(min_row=4, values_only=True)]
     assert scores == sorted(scores, reverse=True)
     book.close()
+
+
+def test_a_limited_ingest_is_not_recorded_as_complete(tmp_path):
+    """Otherwise a --limit smoke test makes the real run skip the file."""
+    from pipeline.stage1_ingest import main as stage1
+    data = tmp_path / "data"
+    data.mkdir()
+    build_workbook(str(data / "part1_of_4.xlsx"))
+    db_path = str(tmp_path / "t.db")
+
+    stage1(["--db", db_path, "--data-dir", str(data), "--limit", "2"])
+    conn = db.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM ingest_log").fetchone()[0] == 0
+    partial = conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0]
+    assert partial < 8
+
+    stage1(["--db", db_path, "--data-dir", str(data)])
+    assert conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 8
+    assert conn.execute("SELECT COUNT(*) FROM ingest_log").fetchone()[0] == 1
+    conn.close()

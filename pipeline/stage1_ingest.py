@@ -153,7 +153,8 @@ UPSERT = (
 def ingest_file(conn, path: str, limit: int | None) -> dict:
     """Read one workbook into the targets table. Returns per-file counters."""
     seen_emails: set[str] = set()
-    stats = {"rows": 0, "emails": 0, "invalid": 0, "dupe_emails": 0}
+    stats = {"rows": 0, "emails": 0, "invalid": 0, "dupe_emails": 0,
+             "truncated": False}
     pending: list[dict] = []
     before = db.count(conn)
     t0 = time.monotonic()
@@ -178,6 +179,7 @@ def ingest_file(conn, path: str, limit: int | None) -> dict:
             conn.commit()
             pending.clear()
         if limit and stats["emails"] >= limit:
+            stats["truncated"] = True
             break
 
     if pending:
@@ -268,7 +270,13 @@ def main(argv=None) -> int:
         print(f"    {stats['rows']:,} email hits, {stats['emails']:,} unique emails, "
               f"{stats['dupe_emails']:,} repeats, +{stats['domains_new']:,} new targets "
               f"in {stats['seconds']:.1f}s")
-        record_ingest(conn, path, stats)
+        if stats["truncated"]:
+            # A --limit smoke test read part of the file. Recording it as
+            # ingested would make the real run skip it without a word.
+            print(f"    partial read (--limit {args.limit}): not recorded as "
+                  f"ingested, so a full run will still read this file")
+        else:
+            record_ingest(conn, path, stats)
 
     print_summary(conn)
     conn.close()
