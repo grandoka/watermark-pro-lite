@@ -532,3 +532,65 @@ def test_a_timed_out_a_record_is_never_settled():
         ("store.com", "MX"): dns.resolver.NoAnswer(),
     }))
     assert result["inconclusive"] is True
+
+
+# --- stage 3: robots.txt ---------------------------------------------------
+
+def robots(body=b"", status=200):
+    return {"status": status, "final_url": None, "headers": {}, "body": body,
+            "content_length": len(body), "truncated": False, "elapsed_ms": 3,
+            "error": None}
+
+
+def run_with_robots(monkeypatch, results, a_host="store.com"):
+    import pipeline.stage3_http as stage3
+    monkeypatch.setattr(stage3, "fetch", scripted_fetch(results))
+    row = {"domain": "store.com", "a_host": a_host}
+    return asyncio.run(stage3.check_domain(object(), row, ignore_robots=False))
+
+
+def test_a_disallowed_root_is_never_fetched(monkeypatch):
+    record = run_with_robots(monkeypatch, [
+        ("robots.txt", robots(b"User-agent: *\nDisallow: /")),
+        ("store.com", ok()),
+    ])
+    assert record["status"] == config.STATUS_BLOCKED
+    assert record["robots_allowed"] == 0
+    assert record["http_status"] is None  # the page was not requested
+
+
+def test_an_allowed_root_is_fetched(monkeypatch):
+    record = run_with_robots(monkeypatch, [
+        ("robots.txt", robots(b"User-agent: *\nDisallow: /admin\nAllow: /")),
+        ("store.com", ok()),
+    ])
+    assert record["status"] == config.STATUS_LIVE
+    assert record["robots_allowed"] == 1
+
+
+def test_a_404_on_robots_means_no_rules(monkeypatch):
+    record = run_with_robots(monkeypatch, [
+        ("robots.txt", robots(b"Not Found", status=404)),
+        ("store.com", ok()),
+    ])
+    assert record["status"] == config.STATUS_LIVE
+
+
+def test_a_5xx_on_robots_is_treated_as_a_refusal(monkeypatch):
+    record = run_with_robots(monkeypatch, [
+        ("robots.txt", robots(b"", status=503)),
+        ("store.com", ok()),
+    ])
+    assert record["status"] == config.STATUS_BLOCKED
+
+
+def test_robots_is_consulted_on_the_origin_actually_fetched(monkeypatch):
+    """An http-only store's rules must be read too, not skipped because the
+    https origin never answered."""
+    record = run_with_robots(monkeypatch, [
+        ("https://store.com/robots.txt", refused()),
+        ("https://store.com/", refused()),
+        ("http://store.com/robots.txt", robots(b"User-agent: *\nDisallow: /")),
+        ("http://store.com/", ok()),
+    ])
+    assert record["status"] == config.STATUS_BLOCKED

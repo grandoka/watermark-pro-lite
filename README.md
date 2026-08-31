@@ -108,9 +108,11 @@ thousands of domains. Tries `https://`, then `http://`, then `https://www.`;
 retries once on timeout, never on a 4xx. Certificates are verified, so a store
 with a broken cert falls back to http rather than being silently accepted.
 
-`robots.txt` is fetched once per domain and the root is skipped when it is
-disallowed. A 4xx there means no rules and full access; an explicit 5xx is
-treated as a refusal.
+`robots.txt` is consulted for the origin actually being fetched -- one request
+per domain in the common case where https answers, but an http-only store's
+rules get read too instead of being skipped because the https origin never
+replied. A disallowed root is never requested. A 4xx there means no rules and
+full access; an explicit 5xx is treated as a refusal.
 
 Detects Shopify, WooCommerce, BigCommerce, Magento, PrestaShop, Wix,
 Squarespace and OpenCart from body and header signatures, plus `has_cart`,

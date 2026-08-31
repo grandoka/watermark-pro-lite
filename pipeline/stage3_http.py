@@ -127,8 +127,8 @@ def _error(reason: str, started: float) -> dict:
 ROBOTS_TIMEOUT = aiohttp.ClientTimeout(connect=5, sock_read=5, total=8)
 
 
-async def robots_allows(session, domain: str, url: str) -> tuple[bool, str | None]:
-    """Check robots.txt once per domain for the site root.
+async def robots_allows(session, origin: str) -> tuple[bool, str | None]:
+    """Check robots.txt for one origin before fetching its root.
 
     Follows RFC 9309 where it matters: a 4xx (including 404) means no rules
     and full access, an explicit 5xx means the server is telling us to stay
@@ -136,7 +136,6 @@ async def robots_allows(session, domain: str, url: str) -> tuple[bool, str | Non
     rules to honour, and the page fetch that follows will fail on its own if
     the host really is down.
     """
-    origin = "{0}://{1}".format(*urlsplit(url)[:2])
     # No timeout retry here: robots.txt is a gate, not the payload, and
     # doubling its cost on every unresponsive host dominates the run.
     result = await fetch(session, f"{origin}/robots.txt", retry_timeout=False,
@@ -212,15 +211,22 @@ async def check_domain(session, row, ignore_robots: bool) -> dict:
               "content_length": None, "http_error": None,
               "status": config.STATUS_ERROR, "inconclusive": False}
 
-    if not ignore_robots:
-        allowed, reason = await robots_allows(session, domain, urls[0])
-        if not allowed:
-            record.update(robots_allowed=0, http_error=reason,
-                          status=config.STATUS_BLOCKED)
-            return record
-
     result = None
+    checked: set[str] = set()
     for url in urls:
+        origin = "{0}://{1}".format(*urlsplit(url)[:2])
+        # Consult robots for the origin we are about to fetch, not just the
+        # first one we hoped would work: an http-only store's rules would
+        # otherwise never be read at all. In the common case where https
+        # answers, this is still one robots fetch for the domain.
+        if not ignore_robots and origin not in checked:
+            checked.add(origin)
+            allowed, reason = await robots_allows(session, origin)
+            if not allowed:
+                record.update(robots_allowed=0, http_error=reason,
+                              status=config.STATUS_BLOCKED)
+                return record
+
         result = await fetch(session, url)
         if result["status"] is not None:
             break
