@@ -594,3 +594,164 @@ def test_robots_is_consulted_on_the_origin_actually_fetched(monkeypatch):
         ("http://store.com/", ok()),
     ])
     assert record["status"] == config.STATUS_BLOCKED
+
+
+# --- stage 1: the input shapes, end to end ---------------------------------
+
+def build_workbook(path):
+    """A workbook mixing both observed shapes, plus the messes seen in the data."""
+    import openpyxl as opx
+    wb = opx.Workbook()
+
+    headed = wb.active
+    headed.title = "Sheet1"
+    headed.append(["created", "emails"])
+    headed.append([dt.datetime(2024, 6, 7), "info@alpha.com"])
+    # Several addresses packed into one cell, colon separated.
+    headed.append([dt.datetime(2023, 1, 2), "a@beta.com:info@beta.com:sales@beta.com"])
+    # An older contact at a domain that also appears newer, further down.
+    headed.append([dt.datetime(2017, 3, 4), "old@alpha.com"])
+    headed.append([dt.datetime(2025, 2, 1), "hola@gamma.es"])
+    headed.append([dt.datetime(2016, 9, 23)])          # date, no email
+    headed.append([dt.datetime(2020, 1, 1), "not an email at all"])
+
+    ragged = wb.create_sheet("Sheet3")
+    ragged.append(["info@delta.co.uk", "support@delta.co.uk"])   # 2 columns
+    ragged.append(["shop@epsilon.ca"])                            # 1 column
+    ragged.append([None, "mailto:kontakt@zeta.de", None, "x"])    # gaps and junk
+    ragged.append(["one@eta.com"] + [None] * 12 + ["two@theta.com"])  # 14 wide
+    ragged.append(["mailto"])                                     # bare junk
+    wb.save(path)
+
+
+def test_both_input_shapes_are_ingested(tmp_path):
+    from pipeline.stage1_ingest import main as stage1
+    data = tmp_path / "data"
+    data.mkdir()
+    build_workbook(str(data / "part1_of_4.xlsx"))
+    db_path = str(tmp_path / "t.db")
+
+    assert stage1(["--db", db_path, "--data-dir", str(data)]) == 0
+
+    conn = db.connect(db_path)
+    rows = {r["domain"]: r for r in conn.execute("SELECT * FROM targets")}
+
+    # Every domain from both sheets, and nothing invented from the junk cells.
+    assert set(rows) == {"alpha.com", "beta.com", "gamma.es", "delta.co.uk",
+                         "epsilon.ca", "zeta.de", "eta.com", "theta.com"}
+
+    # Domain dedupe kept the newest contact of the three at beta.com, and
+    # preferred the 2024 alpha.com contact over the 2017 one.
+    assert rows["beta.com"]["email_count"] == 3
+    assert rows["alpha.com"]["created_year"] == 2024
+    assert rows["alpha.com"]["email"] == "info@alpha.com"
+
+    # The headerless sheet carries no dates at all.
+    assert rows["eta.com"]["created"] is None
+
+    # Classification survived the trip through the workbook.
+    assert rows["delta.co.uk"]["jurisdiction"] == "PECR"
+    assert rows["zeta.de"]["jurisdiction"] == "EU"
+    assert rows["epsilon.ca"]["jurisdiction"] == "CASL"
+    assert rows["gamma.es"]["is_role"] == 1
+    conn.close()
+
+
+def test_a_second_ingest_is_a_no_op(tmp_path):
+    from pipeline.stage1_ingest import main as stage1
+    data = tmp_path / "data"
+    data.mkdir()
+    build_workbook(str(data / "part1_of_4.xlsx"))
+    db_path = str(tmp_path / "t.db")
+
+    stage1(["--db", db_path, "--data-dir", str(data)])
+    conn = db.connect(db_path)
+    before = conn.execute("SELECT SUM(email_count) FROM targets").fetchone()[0]
+
+    stage1(["--db", db_path, "--data-dir", str(data)])
+    after = conn.execute("SELECT SUM(email_count) FROM targets").fetchone()[0]
+    assert after == before, "re-running stage 1 must not double-count contacts"
+    conn.close()
+
+
+# --- stage 4: the workbooks themselves -------------------------------------
+
+def seed_scored_targets(conn):
+    """Four targets, one destined for each workbook."""
+    rows = [
+        # a live Shopify store on a .com: tier 1
+        ("good.com", "good.com", "team@good.com", "PERMISSIVE", "com", 0, 0, 2024,
+         1, 1, "live", "Shopify", 1, 1, 0, 200, 300),
+        # the same store, but German: tier 2
+        ("gute.de", "gute.de", "info@gute.de", "EU", "de", 0, 1, 2024,
+         1, 1, "live", "Shopify", 1, 1, 0, 200, 300),
+        # live but nothing going for it: tier 3
+        ("meh.com", "meh.com", "info@meh.com", "PERMISSIVE", "com", 0, 1, 2016,
+         1, 1, "live", None, 1, 0, 0, 200, 8000),
+        # parked: dropped
+        ("gone.com", "gone.com", "info@gone.com", "PERMISSIVE", "com", 0, 1, 2024,
+         1, 1, "parked", None, 0, 0, 1, 200, 300),
+    ]
+    conn.executemany(
+        "INSERT INTO targets (target_key, domain, email, jurisdiction, tld, "
+        "is_freemail, is_role, created_year, dns_resolves, has_mx, status, "
+        "platform, has_cart, has_product_schema, is_parked, http_status, "
+        "response_time_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+
+
+def test_stage4_writes_one_workbook_per_tier(tmp_path):
+    import openpyxl as opx
+    from pipeline.stage4_score import main as stage4
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    seed_scored_targets(conn)
+    conn.close()
+
+    out = tmp_path / "out"
+    assert stage4(["--db", db_path, "--out-dir", str(out)]) == 0
+
+    expected = {"tier1_email.xlsx": "good.com", "tier2_ads.xlsx": "gute.de",
+                "tier3_nurture.xlsx": "meh.com", "dropped.xlsx": "gone.com"}
+    for filename, domain in expected.items():
+        book = opx.load_workbook(str(out / filename))
+        sheet = book.worksheets[0]
+        header = [c.value for c in sheet[3]]
+        assert header[:10] == ["domain", "email", "platform", "score",
+                               "created_year", "jurisdiction", "http_status",
+                               "has_cart", "page_title", "final_url"], filename
+        body = [r[0] for r in sheet.iter_rows(min_row=4, values_only=True)]
+        assert body == [domain], filename
+        book.close()
+
+    # dropped.xlsx carries the reason; the others do not.
+    dropped = opx.load_workbook(str(out / "dropped.xlsx"))
+    sheet = dropped.worksheets[0]
+    assert [c.value for c in sheet[3]][-1] == "reason"
+    assert "parked" in sheet.cell(row=4, column=11).value
+    dropped.close()
+
+
+def test_workbooks_are_sorted_by_descending_score(tmp_path):
+    import openpyxl as opx
+    from pipeline.stage4_score import main as stage4
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    conn.executemany(
+        "INSERT INTO targets (target_key, domain, email, jurisdiction, tld, "
+        "is_freemail, is_role, created_year, dns_resolves, has_mx, status, "
+        "platform, has_cart, has_product_schema, is_parked, http_status, "
+        "response_time_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(f"s{i}.com", f"s{i}.com", f"team@s{i}.com", "PERMISSIVE", "com", 0, 0,
+          year, 1, 1, "live", platform, 1, 1, 0, 200, 300)
+         for i, (year, platform) in enumerate(
+             [(2020, "Wix"), (2024, "Shopify"), (2022, "Magento")])])
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "out"
+    stage4(["--db", db_path, "--out-dir", str(out)])
+    book = opx.load_workbook(str(out / "tier1_email.xlsx"))
+    scores = [r[3] for r in book.worksheets[0].iter_rows(min_row=4, values_only=True)]
+    assert scores == sorted(scores, reverse=True)
+    book.close()

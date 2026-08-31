@@ -55,8 +55,11 @@ Configuration comes from the environment, never from code:
 python -m pytest tests/ -q
 ```
 
-81 tests over the pure logic -- extraction, classification, dedupe,
-fingerprinting, scoring and tiering. No network.
+107 tests. Mostly pure logic -- extraction, classification, dedupe,
+fingerprinting, scoring, tiering -- plus end-to-end coverage of stage 1
+against a synthetic workbook carrying both input shapes and the messes the
+real data contains, and of stage 4's output workbooks. Nothing touches the
+network: the DNS resolver and the HTTP fetch are both scripted.
 
 ## Stage 1 -- ingest
 
