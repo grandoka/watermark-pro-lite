@@ -217,6 +217,27 @@ It collects three things per shop, in at most two page fetches plus one HEAD:
   product photo (sampled past logos and payment marks, weighed with a HEAD
   request so nothing is downloaded).
 
+## Outreach workbook
+
+```bash
+python -m pipeline.export_outreach --min-images 20
+```
+
+Stage 4's workbooks answer *may I email this shop*. `outreach.xlsx` answers
+*do I have a way in, and is this shop the right shape for the pitch*, so it
+cuts across tiers -- a German shop that may never be cold-emailed is still a
+good LinkedIn approach once the Impressum names its owner. Because it crosses
+tiers, **every row carries `email_ok`, and a row marked `NO` must never be
+sent to.**
+
+| Sheet | What it holds |
+|---|---|
+| best leads | image-heavy shops with a working cart *and* a name or LinkedIn |
+| image sites no cart | photographers, galleries, catalogues -- not shops, but they own a lot of images |
+| named owners | a real person, mostly from the DACH Impressum |
+| linkedin only | an account but no name; a company page needs one more hop |
+| image heavy no contact | good fit, email is the only route |
+
 ## Outreach policy
 
 * **tier 1** is the only tier that gets cold email.
