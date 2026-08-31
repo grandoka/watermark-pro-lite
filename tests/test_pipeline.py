@@ -1014,3 +1014,64 @@ def test_owner_titles_and_dangling_particles_are_trimmed(text, name):
 
 def test_a_single_word_is_not_accepted_as_a_person():
     assert extract_owner("<p>Inhaber: Dr. Schmidt</p>") is None
+
+
+def test_the_owner_is_read_from_the_home_page_footer_too():
+    """Outside DACH/FR/ES most shops state the operator in the footer rather
+    than on a dedicated legal page, so the free scan catches what the extra
+    fetch never sees."""
+    footer = '<footer><p>Eigenaar: Jan de Vries &middot; KvK 12345678</p></footer>'
+    assert extract_owner(footer) == "Jan de Vries"
+
+
+def run_profile(monkeypatch, results):
+    """Drive stage 5's per-shop work against scripted responses."""
+    import pipeline.stage5_profile as stage5
+    monkeypatch.setattr(stage5, "fetch", scripted_fetch(results))
+    row = {"domain": "shop.de", "final_url": "https://shop.de/", "a_host": "shop.de"}
+    return asyncio.run(stage5.profile(object(), row, probe_image=False))
+
+
+def page(body, status=200):
+    return {"status": status, "final_url": "https://shop.de/", "headers": {},
+            "body": body, "content_length": len(body), "truncated": False,
+            "elapsed_ms": 40, "error": None}
+
+
+def test_a_legal_notice_overrides_a_footer_guess(monkeypatch):
+    """Both can name someone; the dedicated page is the reliable statement."""
+    record = run_profile(monkeypatch, [
+        ("robots.txt", page(b"User-agent: *\nAllow: /")),
+        ("/impressum", page("<p>Vertreten durch: Neue Angabe</p>".encode())),
+        ("shop.de/", page('<footer>Inhaber: Alte Angabe<a href="/impressum">I</a></footer>'.encode())),
+    ])
+    assert record["owner_name"] == "Neue Angabe"
+    assert record["owner_source"] == "legal_notice"
+
+
+def test_the_footer_name_stands_when_there_is_no_legal_page(monkeypatch):
+    record = run_profile(monkeypatch, [
+        ("robots.txt", page(b"User-agent: *\nAllow: /")),
+        ("shop.de/", page(b"<footer>Eigenaar: Jan de Vries</footer>")),
+    ])
+    assert record["owner_name"] == "Jan de Vries"
+    assert record["owner_source"] == "footer"
+
+
+def test_linkedin_on_the_legal_page_is_picked_up(monkeypatch):
+    """The page is fetched for the owner anyway, so the account is free."""
+    record = run_profile(monkeypatch, [
+        ("robots.txt", page(b"User-agent: *\nAllow: /")),
+        ("/impressum", page(b'<a href="https://linkedin.com/in/jan-vries">li</a>')),
+        ("shop.de/", page(b'<a href="/impressum">Impressum</a>')),
+    ])
+    assert record["linkedin_url"] == "https://www.linkedin.com/in/jan-vries"
+
+
+def test_a_disallowed_shop_is_not_profiled(monkeypatch):
+    record = run_profile(monkeypatch, [
+        ("robots.txt", page(b"User-agent: *\nDisallow: /")),
+        ("shop.de/", page(b"<footer>Inhaber: Max Mustermann</footer>")),
+    ])
+    assert record["profile_error"] == "robots_disallow"
+    assert record["owner_name"] is None
