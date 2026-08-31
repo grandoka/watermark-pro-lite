@@ -576,12 +576,27 @@ def test_a_404_on_robots_means_no_rules(monkeypatch):
     assert record["status"] == config.STATUS_LIVE
 
 
-def test_a_5xx_on_robots_is_treated_as_a_refusal(monkeypatch):
+def test_a_5xx_on_robots_backs_off_but_does_not_settle(monkeypatch):
+    """robots.txt being unavailable is usually a CDN rate-limiting us, not the
+    site refusing anyone -- so back off now and ask again, rather than writing
+    the shop off permanently."""
     record = run_with_robots(monkeypatch, [
         ("robots.txt", robots(b"", status=503)),
         ("store.com", ok()),
     ])
     assert record["status"] == config.STATUS_BLOCKED
+    assert record["inconclusive"] is True
+    assert record["http_status"] is None  # still never fetched
+
+
+def test_a_published_disallow_settles_the_domain(monkeypatch):
+    """An actual Disallow rule is a standing decision, not a transient one."""
+    record = run_with_robots(monkeypatch, [
+        ("robots.txt", robots(b"User-agent: *\nDisallow: /")),
+        ("store.com", ok()),
+    ])
+    assert record["status"] == config.STATUS_BLOCKED
+    assert record["inconclusive"] is False
 
 
 def test_robots_is_consulted_on_the_origin_actually_fetched(monkeypatch):

@@ -131,10 +131,11 @@ async def robots_allows(session, origin: str) -> tuple[bool, str | None]:
     """Check robots.txt for one origin before fetching its root.
 
     Follows RFC 9309 where it matters: a 4xx (including 404) means no rules
-    and full access, an explicit 5xx means the server is telling us to stay
-    away. A connection-level failure is treated as allowed -- there are no
-    rules to honour, and the page fetch that follows will fail on its own if
-    the host really is down.
+    and full access. A 5xx means "unavailable" -- back off *for now*, which is
+    a temporary answer rather than a standing refusal, so it is reported
+    separately from a real Disallow rule. A connection-level failure is treated
+    as allowed: there are no rules to honour, and the page fetch that follows
+    will fail on its own if the host really is down.
     """
     # No timeout retry here: robots.txt is a gate, not the payload, and
     # doubling its cost on every unresponsive host dominates the run.
@@ -143,7 +144,9 @@ async def robots_allows(session, origin: str) -> tuple[bool, str | None]:
     if result["error"]:
         return True, None
     if result["status"] and 500 <= result["status"] < 600:
-        return False, f"robots_http_{result['status']}"
+        # Temporary: very often a CDN rate-limiting us rather than the site
+        # refusing anyone. Signalled as retryable, not settled.
+        return False, f"robots_unavailable_{result['status']}"
     if result["status"] and result["status"] >= 400:
         return True, None
     parser = urllib.robotparser.RobotFileParser()
@@ -223,8 +226,13 @@ async def check_domain(session, row, ignore_robots: bool) -> dict:
             checked.add(origin)
             allowed, reason = await robots_allows(session, origin)
             if not allowed:
+                # A published Disallow rule is a standing decision and settles
+                # the domain. robots.txt merely being unavailable is not: we
+                # back off now and ask again on a later pass.
+                temporary = reason.startswith("robots_unavailable")
                 record.update(robots_allowed=0, http_error=reason,
-                              status=config.STATUS_BLOCKED)
+                              status=config.STATUS_BLOCKED,
+                              inconclusive=temporary)
                 return record
 
         result = await fetch(session, url)
@@ -286,16 +294,17 @@ UPDATE targets
  WHERE domain = :domain AND is_freemail = 0
 """
 
-# Nothing answered, and the reason was a timeout. Count the attempt but leave
-# http_checked_at unset so a later pass retries the domain -- unless it has now
-# failed --max-attempts times, at which point unreachable is the honest answer.
+# The domain gave us no usable answer -- it timed out, or its robots.txt was
+# unavailable. Count the attempt but leave http_checked_at unset so a later
+# pass retries it, unless it has now failed --max-attempts times, at which
+# point the terminal status below is the honest verdict.
 UPDATE_INCONCLUSIVE = """
 UPDATE targets
    SET http_error     = :http_error,
        response_time_ms = :response_time_ms,
        http_attempts  = http_attempts + 1,
        status         = CASE WHEN http_attempts + 1 >= :max_attempts
-                            THEN :dead_status ELSE status END,
+                            THEN :terminal_status ELSE status END,
        http_checked_at = CASE WHEN http_attempts + 1 >= :max_attempts
                              THEN :checked_at END
  WHERE domain = :domain AND is_freemail = 0
@@ -399,7 +408,12 @@ async def run(conn, rows, args) -> None:
                 record["checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat(
                     timespec="seconds")
                 record["max_attempts"] = args.max_attempts
-                record["dead_status"] = config.STATUS_DEAD
+                # Where the row lands if it never settles: a host that only
+                # ever times out is dead; one whose robots.txt is never
+                # available stays blocked.
+                record["terminal_status"] = (
+                    config.STATUS_BLOCKED if record["status"] == config.STATUS_BLOCKED
+                    else config.STATUS_DEAD)
                 async with lock:
                     buffer.append(record)
                     if len(buffer) >= BATCH:

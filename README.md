@@ -114,8 +114,12 @@ with a broken cert falls back to http rather than being silently accepted.
 `robots.txt` is consulted for the origin actually being fetched -- one request
 per domain in the common case where https answers, but an http-only store's
 rules get read too instead of being skipped because the https origin never
-replied. A disallowed root is never requested. A 4xx there means no rules and
-full access; an explicit 5xx is treated as a refusal.
+replied. A disallowed root is never requested. A 4xx there means no rules and full
+access. A 5xx means *unavailable*, which RFC 9309 treats as back-off rather
+than a standing refusal -- most of the time it is a CDN rate-limiting the
+crawler, not the site refusing anyone -- so those domains are retried on a
+later pass instead of being written off. On the first run this affected 2,784
+shops, 5.7% of everything fetched.
 
 Detects Shopify, WooCommerce, BigCommerce, Magento, PrestaShop, Wix,
 Squarespace and OpenCart from body and header signatures, plus `has_cart`,
