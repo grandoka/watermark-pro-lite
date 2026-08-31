@@ -275,6 +275,28 @@ def print_summary(conn, args) -> None:
         print(table([(k or "(unidentified)", f"{n:,}", f"{100*n/live:.1f}%")
                      for k, n in rows], ["platform", "domains", "share"]))
 
+    # Live domains that survived disqualification. A disqualified one scores 0
+    # by definition, so including those would pile up a spike at the bottom
+    # that says nothing about where the cutoff belongs.
+    live_scored = conn.execute(
+        "SELECT score FROM targets WHERE status = ? AND tier IS NOT NULL "
+        "AND tier != ? ORDER BY score DESC",
+        (config.STATUS_LIVE, DROPPED)).fetchall()
+    if live_scored:
+        scores = [r["score"] for r in live_scored]
+        print(f"\nScore distribution across {len(scores):,} qualified live "
+              f"domains (tier 1 cutoff {args.min_score}):")
+        buckets = []
+        for low in range(0, 100, 10):
+            high = low + 9 if low < 90 else 100
+            n = sum(1 for x in scores if low <= x <= high)
+            at_or_above = sum(1 for x in scores if x >= low)
+            bar = "#" * round(40 * n / len(scores))
+            buckets.append((f"{low:>3}-{high:<3}", f"{n:,}", f"{at_or_above:,}", bar))
+        print(table(buckets, ["score", "domains", ">= low", ""]))
+        print(f"  Move the cutoff with --min-score; it decides how many live "
+              f"domains are contacted now rather than nurtured.")
+
     t1 = counts.get(TIER1, 0)
     if t1:
         print(f"\nTop 20 TLDs in tier 1 ({t1:,} domains):")
