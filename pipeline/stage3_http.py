@@ -329,7 +329,16 @@ def pending_rows(conn, args) -> list:
     sql += " ORDER BY created_year DESC, domain"
     if args.limit:
         sql += f" LIMIT {int(args.limit)}"
-    return conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, params).fetchall()
+
+    if args.force and rows:
+        # --force asks for a fresh verdict, so earlier failed attempts should
+        # not count against --max-attempts and settle a domain as dead on its
+        # first timeout of this run.
+        conn.executemany("UPDATE targets SET http_attempts = 0 WHERE domain = ?",
+                         [(r["domain"],) for r in rows])
+        conn.commit()
+    return rows
 
 
 async def run(conn, rows, args) -> None:

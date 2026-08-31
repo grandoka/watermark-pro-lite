@@ -156,14 +156,22 @@ UPDATE targets
 
 
 def pending_domains(conn, force: bool, limit: int | None) -> list[str]:
-    sql = ("SELECT domain FROM targets "
-           "WHERE is_freemail = 0")
+    sql = "SELECT domain FROM targets WHERE is_freemail = 0"
     if not force:
         sql += " AND dns_checked_at IS NULL"
     sql += " ORDER BY domain"
     if limit:
         sql += f" LIMIT {int(limit)}"
-    return [r["domain"] for r in conn.execute(sql)]
+    domains = [r["domain"] for r in conn.execute(sql)]
+
+    if force and domains:
+        # --force asks for a fresh verdict, so the earlier failed attempts
+        # should not count against --max-attempts and settle the domain as
+        # dead on its first timeout.
+        conn.executemany("UPDATE targets SET dns_attempts = 0 WHERE domain = ?",
+                         [(d,) for d in domains])
+        conn.commit()
+    return domains
 
 
 async def run(conn, domains: list[str], args) -> None:

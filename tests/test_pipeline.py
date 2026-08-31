@@ -775,3 +775,41 @@ def test_a_limited_ingest_is_not_recorded_as_complete(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 8
     assert conn.execute("SELECT COUNT(*) FROM ingest_log").fetchone()[0] == 1
     conn.close()
+
+
+def test_force_clears_the_attempt_counters(tmp_path):
+    """--force asks for a fresh verdict, so a domain that timed out twice
+    before must not be settled as dead by its first timeout of this run."""
+    import types
+    from pipeline.stage2_dns import pending_domains
+    from pipeline.stage3_http import pending_rows
+
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    conn.execute("INSERT INTO targets (target_key, domain, email, dns_attempts, "
+                 "http_attempts, dns_resolves, created_year, dns_checked_at, "
+                 "http_checked_at) VALUES ('s.com','s.com','a@s.com',2,2,1,2024,"
+                 "'2026-01-01','2026-01-01')")
+    conn.commit()
+
+    pending_domains(conn, force=True, limit=None)
+    assert conn.execute("SELECT dns_attempts FROM targets").fetchone()[0] == 0
+
+    args = types.SimpleNamespace(force=True, limit=None, min_year=2020)
+    pending_rows(conn, args)
+    assert conn.execute("SELECT http_attempts FROM targets").fetchone()[0] == 0
+    conn.close()
+
+
+def test_resume_leaves_the_attempt_counters_alone(tmp_path):
+    import types
+    from pipeline.stage2_dns import pending_domains
+
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    conn.execute("INSERT INTO targets (target_key, domain, email, dns_attempts) "
+                 "VALUES ('s.com','s.com','a@s.com',2)")
+    conn.commit()
+    pending_domains(conn, force=False, limit=None)
+    assert conn.execute("SELECT dns_attempts FROM targets").fetchone()[0] == 2
+    conn.close()
