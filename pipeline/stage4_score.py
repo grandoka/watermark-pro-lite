@@ -71,15 +71,19 @@ def score_row(row) -> int:
     score = 5  # reached a 200; everything below builds on that
 
     # Platform fit is the single biggest lever: Shopify and WooCommerce stores
-    # are the ones the product actually drops into.
-    score += config.PLATFORM_TIERS.get(row["platform"], 0)
+    # are the ones the product actually drops into. An unrecognised platform
+    # scores the unknown-fit floor rather than zero.
+    score += config.PLATFORM_TIERS.get(row["platform"], config.PLATFORM_UNKNOWN_FIT)
 
-    # Commerce liveness. Product schema is rare on a home page (a few percent
-    # of stores put it there), so a cart on its own still earns most of this.
+    # Commerce liveness. The cart carries this: it is the signal that a shop
+    # can actually take money, and 75% of live shops have one. Product schema
+    # on a *home* page turned out to be rare -- 2% of live shops -- so it is a
+    # bonus for a well-built storefront, not a pillar of the score. It used to
+    # carry 13 points, which in practice was a flat penalty on the other 98%.
     if row["has_cart"]:
-        score += 12
+        score += 20
     if row["has_product_schema"]:
-        score += 13
+        score += 5
 
     score += recency_points(row["created_year"])
 

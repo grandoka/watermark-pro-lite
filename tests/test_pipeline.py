@@ -240,9 +240,31 @@ def test_score_is_bounded_and_ordered():
 
 def test_platform_fit_dominates():
     shopify = score_row(make_row(platform="Shopify"))
+    magento = score_row(make_row(platform="Magento"))
     wix = score_row(make_row(platform="Wix"))
-    none = score_row(make_row(platform=None))
-    assert shopify > wix > none
+    assert shopify > magento > wix
+
+
+def test_an_unrecognised_platform_is_unknown_fit_not_bad_fit():
+    """23% of live shops could not be fingerprinted. Scoring them zero on the
+    largest weight punished them for a gap in our knowledge, not a defect in
+    the shop, so they get the same floor as a platform we can name but fit
+    poorly -- and still rank below the ones we fit well."""
+    unknown = score_row(make_row(platform=None))
+    assert unknown == score_row(make_row(platform="Wix"))
+    assert unknown < score_row(make_row(platform="WooCommerce"))
+    assert unknown > 0
+
+
+def test_the_cart_outweighs_product_schema():
+    """Only 2% of live shops publish product JSON-LD on the home page, so the
+    schema is a bonus for a well-built storefront. The cart is the signal that
+    a shop can take money at all, and it carries the weight."""
+    cart_only = score_row(make_row(has_cart=1, has_product_schema=0))
+    schema_only = score_row(make_row(has_cart=0, has_product_schema=1))
+    assert cart_only > schema_only
+    # A shop missing the rare signal is not thereby a bad prospect.
+    assert score_row(make_row(has_product_schema=0)) >= 90
 
 
 def test_role_inbox_is_a_small_penalty():

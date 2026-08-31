@@ -159,6 +159,14 @@ PLATFORM_TIERS = {
     "Squarespace": 10,
 }
 
+# A live shop with a working cart is demonstrably a shop, whether or not its
+# platform could be named. 23% of live shops could not be fingerprinted -- many
+# are behind a CDN or on a custom build -- and scoring them zero on the largest
+# weight sent them to the nurture pile for a gap in our knowledge rather than a
+# defect in the shop. They are unknown fit, not bad fit, so they get a floor
+# level with the platforms we can name but do not fit well.
+PLATFORM_UNKNOWN_FIT = 10
+
 # --- page signals ----------------------------------------------------------
 
 CART_PATTERNS = [

@@ -151,12 +151,28 @@ Each live domain scores 0-100:
 | Shopify / WooCommerce | +35 |
 | BigCommerce / Magento / PrestaShop / OpenCart | +22 |
 | Wix / Squarespace | +10 |
-| `has_cart` | +12 |
-| `has_product_schema` | +13 |
+| platform not identified | +10 |
+| `has_cart` | +20 |
+| `has_product_schema` | +5 |
 | created 2024+ / 2022-23 / 2020-21 | +15 / +12 / +6 |
 | `has_mx` | +15 |
 | responds in under 2s | +5 |
 | `is_role` | -5 |
+
+Two of these weights were set from guesswork and corrected once the real
+distribution existed:
+
+* **`has_product_schema` was +13.** Only 2% of live shops publish product
+  JSON-LD on their *home* page -- it lives on product pages -- so a pillar of
+  the score was in practice a flat 13-point penalty on the other 98%. It is now
+  a +5 bonus for a well-built storefront, and the cart took the weight: it is
+  the signal that a shop can take money at all, and 75% of live shops have one.
+* **An unidentified platform scored 0** on the largest weight. 23% of live shops
+  could not be fingerprinted -- behind a CDN, or a custom build -- so a live shop
+  with a working cart was sent to the nurture pile for a gap in our knowledge
+  rather than a defect in the shop. Unknown fit now scores the same floor as a
+  platform we can name but fit poorly, and still ranks below the ones we fit
+  well.
 
 Parked pages, a missing cart and any non-200 response are disqualifying.
 Targets the earlier stages have not reached yet get **no** tier and appear in
