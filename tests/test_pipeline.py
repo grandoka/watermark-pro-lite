@@ -880,3 +880,121 @@ def test_the_export_survives_an_illegal_character_in_the_database(tmp_path):
     book = opx.load_workbook(str(out / "tier1_email.xlsx"))
     assert book.worksheets[0].cell(row=4, column=9).value == "Stray Backspace Shop"
     book.close()
+
+
+# --- stage 5: outreach profiling -------------------------------------------
+
+from pipeline.stage5_profile import (audit_images, extract_owner, extract_socials,
+                                     find_legal_url, strip_tags)
+
+FOOTER = """
+<footer>
+  <a href="https://www.linkedin.com/company/acme-shop/">LinkedIn</a>
+  <a href="https://instagram.com/acmeshop">Instagram</a>
+  <a href="https://www.facebook.com/sharer.php?u=https://acme.com">Share</a>
+  <a href="/impressum">Impressum</a>
+</footer>"""
+
+
+def test_social_accounts_are_read_from_the_footer():
+    s = extract_socials(FOOTER, "https://acme.com/")
+    assert s["linkedin_url"] == "https://www.linkedin.com/company/acme-shop"
+    assert s["linkedin_kind"] == "company"
+    assert s["instagram_url"] == "https://www.instagram.com/acmeshop"
+    assert s["social_count"] == 2
+
+
+def test_a_share_widget_is_not_the_shops_facebook_account():
+    """Every shop links facebook.com/sharer.php; almost none of them own it."""
+    assert extract_socials(FOOTER, "https://acme.com/")["facebook_url"] is None
+
+
+def test_a_named_person_beats_a_company_page():
+    """The pitch goes to a human, so prefer /in/ over /company/."""
+    html = ('<a href="https://linkedin.com/company/acme">c</a>'
+            '<a href="https://linkedin.com/in/jane-doe-123">p</a>')
+    s = extract_socials(html, "https://acme.com/")
+    assert s["linkedin_kind"] == "personal"
+    assert s["linkedin_url"].endswith("/in/jane-doe-123")
+
+
+def test_legal_page_link_is_found_and_absolutised():
+    assert find_legal_url(FOOTER, "https://acme.com/") == "https://acme.com/impressum"
+    assert find_legal_url('<a href="/aviso-legal/">Aviso</a>', "https://t.es/") \
+        == "https://t.es/aviso-legal/"
+    assert find_legal_url("<a href='/about'>About</a>", "https://x.com/") is None
+
+
+@pytest.mark.parametrize("text, name", [
+    ("Vertreten durch: Max Mustermann", "Max Mustermann"),
+    ("Inhaber\nAnna-Lena Weiß\nHauptstr. 3", "Anna-Lena Weiß"),
+    ("Geschäftsführer: Dr. Klaus Müller", "Klaus Müller"),
+    ("Eigenaar: Jan de Vries", "Jan de Vries"),
+    ("Legale rappresentante: Marco Rossi", "Marco Rossi"),
+    ("Responsable: María del Carmen Ruiz", "María del Carmen Ruiz"),
+])
+def test_owner_name_from_a_legal_notice(text, name):
+    assert extract_owner(f"<div>{text}</div>") == name
+
+
+def test_a_company_form_is_not_a_person():
+    """'Titular: MUEBLES SL' names a company, not someone to write to."""
+    assert extract_owner("<p>Titular: MUEBLES SL</p>") is None
+    assert extract_owner("<p>Vertreten durch: Beispiel GmbH</p>") is None
+
+
+def test_owner_extraction_ignores_script_content():
+    html = "<script>var Inhaber = 'Fake Name';</script><p>Inhaber: Echt Person</p>"
+    assert extract_owner(html) == "Echt Person"
+
+
+IMAGES = """
+<meta property="og:image" content="https://acme.com/og.jpg">
+<meta name="description" content="Acme sells things">
+<img src="/img/logo.png" alt="Acme logo">
+<img src="/img/product-chair.jpg">
+<img src="/img/product-desk.jpg" alt="Desk" loading="lazy" srcset="/img/d-2x.jpg 2x">
+<img src="https://cdn.other.net/img/lamp.webp" alt="Lamp">
+<img src="data:image/gif;base64,R0lGOD">
+"""
+
+
+def test_image_audit_counts_the_practices_that_matter():
+    a = audit_images(IMAGES, "https://acme.com/")
+    assert a["image_count"] == 4           # the data: URI is not a served image
+    assert a["images_no_alt"] == 1         # product-chair
+    assert a["images_lazy"] == 1
+    assert a["images_srcset"] == 1
+    assert a["images_offsite"] == 1        # the cdn.other.net lamp
+    assert a["images_modern"] == 1         # the .webp
+    assert a["has_og_image"] == 1 and a["has_meta_desc"] == 1
+
+
+def test_the_sampled_image_is_a_product_photo_not_the_logo():
+    """The byte size only means something if it is a real product image."""
+    assert audit_images(IMAGES, "https://acme.com/")["sample_image_url"] \
+        == "https://acme.com/img/product-chair.jpg"
+    only_chrome = '<img src="/logo.png"><img src="/icons/visa.png">'
+    assert audit_images(only_chrome, "https://acme.com/")["sample_image_url"] is None
+
+
+def test_strip_tags_drops_scripts_and_keeps_text():
+    assert "alert" not in strip_tags("<script>alert(1)</script><p>Hello</p>")
+    assert "Hello" in strip_tags("<script>alert(1)</script><p>Hello</p>")
+
+
+@pytest.mark.parametrize("text, name", [
+    # Seen in the live run: a job title captured as part of the name.
+    ("Vertreten durch: Ministerialdirektor Hubert Bittlmayer", "Hubert Bittlmayer"),
+    ("Inhaber: Dipl.-Ing. Karl Schmidt", "Karl Schmidt"),
+    # Seen in the live run: a surname particle left dangling at a line end.
+    ("Inhaber: Philip Dean Kruk-De\nAdresse", "Philip Dean Kruk"),
+    # A particle in the middle is part of the name and must survive.
+    ("Eigenaar: Bas van de Sande", "Bas van de Sande"),
+])
+def test_owner_titles_and_dangling_particles_are_trimmed(text, name):
+    assert extract_owner(f"<div>{text}</div>") == name
+
+
+def test_a_single_word_is_not_accepted_as_a_person():
+    assert extract_owner("<p>Inhaber: Dr. Schmidt</p>") is None

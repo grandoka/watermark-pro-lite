@@ -224,3 +224,98 @@ STATUS_MX_ONLY = "mx_only"
 STATUS_BLOCKED = "blocked"
 # Older than --min-year: deliberately not crawled, held for the nurture tier.
 STATUS_AGED_OUT = "aged_out"
+
+
+# --- stage 5: outreach profiling -------------------------------------------
+
+# Social profiles, from anywhere in the page (footers mostly, sometimes the
+# header). The capture group is the handle/slug, which is what identifies the
+# account -- the surrounding URL varies by locale and tracking parameters.
+SOCIAL_PATTERNS = {
+    "linkedin_company": re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/company/([A-Za-z0-9_\-.%]+)""", re.I),
+    "linkedin_person": re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?linkedin\.com/in/([A-Za-z0-9_\-.%]+)""", re.I),
+    "instagram": re.compile(
+        r"""https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)""", re.I),
+    "facebook": re.compile(
+        r"""https?://(?:[a-z]{2,3}\.)?facebook\.com/([A-Za-z0-9_.\-]+)""", re.I),
+}
+
+# Facebook and Instagram URLs that are share widgets or platform pages rather
+# than the shop's own account.
+SOCIAL_NOISE = {
+    "sharer", "share", "sharer.php", "dialog", "plugins", "tr", "profile.php",
+    "pages", "groups", "events", "login", "help", "policies", "privacy",
+    "accounts", "explore", "p", "reel", "reels", "legal", "about",
+}
+
+# The legal-notice page. EU e-commerce law requires the operator's name on it,
+# which makes it the highest-yield source of a named human for this list --
+# higher than LinkedIn, since a small shop that has no LinkedIn presence at all
+# still has to publish this.
+LEGAL_PAGE_RE = re.compile(
+    r"""href\s*=\s*["']([^"']*(?:impressum|imprint|legal-?notice|aviso-?legal"""
+    r"""|mentions-?legales|note-?legali|informazioni-?legali|colofon"""
+    r"""|informacion-?legal|legal-?information|kontakt-?impressum)[^"']*)["']""", re.I)
+
+# Labels that introduce the responsible person on a legal-notice page, by
+# locale. The name follows the label.
+# Labels that introduce the responsible person on a legal-notice page, by
+# locale. The name follows the label, at most one line break away -- word
+# separators are spaces rather than \s, or the pattern runs past the end of
+# the line and swallows the next label as a surname.
+_NAME_WORD = (r"[A-ZÄÖÜÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÇÑ]"
+              r"[\wÄÖÜäöüßÁÉÍÓÚáéíóúÀÈÌÒÙàèìòùÂÊÎÔÛâêîôûÇçÑñ'’\-]{1,30}")
+# Lowercase particles carried by Dutch, German, Spanish, Italian and French
+# surnames -- "Jan de Vries", "Anna van der Berg". Requiring every word to be
+# capitalised drops these names entirely.
+_NAME_PARTICLE = (r"(?:de|del|della|di|da|dos|du|van|von|der|den|ter|te|le|la"
+                  r"|el|al|bin|ibn|of|op|het|'t)")
+
+OWNER_LABELS = re.compile(
+    r"""(?:Vertreten\s+durch|Inhaber(?:in)?|Gesch[aä]ftsf[uü]hrer(?:in)?"""
+    r"""|Vertretungsberechtigt(?:er|e)?|Eigent[uü]mer(?:in)?"""
+    r"""|Titular|Responsable|Representante\s+legal"""
+    r"""|Legale\s+rappresentante|Rappresentante\s+legale|Titolare"""
+    r"""|Directeur\s+de\s+la\s+publication|Responsable\s+de\s+publication"""
+    r"""|Eigenaar|Bestuurder"""
+    r"""|Owner|Managing\s+Director|Proprietor)"""
+    r"""[ \t]*[:\-–]?[ \t]*\n?[ \t]*"""
+    # Honorifics, then any run of dotted abbreviations -- "Dipl.-Ing.",
+    # "Dr. med." -- consumed before the name so the capture can start on a
+    # letter rather than failing on the dot.
+    r"""(?:(?:Herr|Frau|Mr|Mrs|Ms|Dhr|Mevr)\.?[ \t]*)*"""
+    r"""(?:[A-Za-zÄÖÜäöüß]{2,24}\.[ \t]*-?[ \t]*)*"""
+    + f"({_NAME_WORD}(?:[ \\t]+{_NAME_PARTICLE})*(?:[ \\t]+{_NAME_WORD}){{1,3}})")
+
+# Honorifics and job titles that sit in front of the name on a legal notice.
+# "Ministerialdirektor Hubert Bittlmayer" is a title plus a name, not a
+# three-part name.
+OWNER_TITLES = {
+    "dr", "prof", "dipl", "ing", "mag", "mba", "msc", "bsc", "med", "phd",
+    "herr", "frau", "mr", "mrs", "ms", "dhr", "mevr", "sr", "sra", "don",
+    "ministerialdirektor", "ministerialrat", "direktor", "director",
+    "geschäftsführer", "geschaeftsfuehrer", "inhaber", "inhaberin",
+    "eigentümer", "eigentuemer", "vorstand", "president", "presidente",
+    "rechtsanwalt", "steuerberater", "apotheker", "architekt",
+}
+
+# Words that look like a name to the pattern above but are a company form.
+OWNER_STOPWORDS = {
+    "gmbh", "ug", "kg", "ohg", "gbr", "ag", "mbh", "co", "kgaa", "ev", "e.v",
+    "ltd", "limited", "llc", "inc", "plc", "bv", "b.v", "nv", "n.v", "sarl",
+    "sas", "sa", "srl", "spa", "s.r.l", "sl", "s.l", "sp", "oy", "ab", "aps",
+    "gmbh&co", "unternehmergesellschaft", "haftungsbeschränkt", "company",
+    "the", "our", "this", "die", "der", "das", "und", "siehe", "oben",
+}
+
+IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+ATTR_RE = re.compile(r"""([a-zA-Z_:][-\w:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s">]+))""")
+OG_IMAGE_RE = re.compile(
+    r"""<meta[^>]+(?:property|name)\s*=\s*["']og:image["'][^>]*>""", re.I)
+META_DESC_RE = re.compile(
+    r"""<meta[^>]+name\s*=\s*["']description["'][^>]+content\s*=\s*["']([^"']{1,400})["']""", re.I)
+
+MODERN_IMAGE_EXT = (".webp", ".avif")
+RASTER_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff")

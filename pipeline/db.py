@@ -8,6 +8,7 @@ columns:
     stage 2  dns_*/a_host                (dns_resolves .. dns_checked_at)
     stage 3  http_*/platform/signals     (http_status .. http_checked_at)
     stage 4  score/tier                  (score, tier, tier_reason, scored_at)
+    stage 5  outreach profile            (linkedin_url .. profile_checked_at)
     verify   deliverability API results  (verify_*)
 
 `status` is the one column several stages touch; it always reflects the latest
@@ -73,6 +74,29 @@ CREATE TABLE IF NOT EXISTS targets (
     tier_reason       TEXT,
     scored_at         TEXT,
 
+    linkedin_url      TEXT,
+    linkedin_kind     TEXT,
+    instagram_url     TEXT,
+    facebook_url      TEXT,
+    social_count      INTEGER,
+    image_count       INTEGER,
+    images_no_alt     INTEGER,
+    images_lazy       INTEGER,
+    images_srcset     INTEGER,
+    images_offsite    INTEGER,
+    images_modern     INTEGER,
+    has_og_image      INTEGER,
+    has_meta_desc     INTEGER,
+    sample_image_url  TEXT,
+    sample_image_bytes INTEGER,
+    sample_image_type TEXT,
+    legal_url         TEXT,
+    owner_name        TEXT,
+    owner_source      TEXT,
+    profile_error     TEXT,
+    profile_attempts  INTEGER NOT NULL DEFAULT 0,
+    profile_checked_at TEXT,
+
     verify_status     TEXT,
     verify_result     TEXT,
     verified_at       TEXT
@@ -100,6 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_targets_http_checked ON targets(http_checked_at);
 CREATE INDEX IF NOT EXISTS idx_targets_dns_resolves ON targets(dns_resolves);
 CREATE INDEX IF NOT EXISTS idx_targets_tier         ON targets(tier);
 CREATE INDEX IF NOT EXISTS idx_targets_domain       ON targets(domain);
+CREATE INDEX IF NOT EXISTS idx_targets_profiled     ON targets(profile_checked_at);
 """
 
 

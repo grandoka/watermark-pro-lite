@@ -193,6 +193,30 @@ nurture list".
 4. not crawled (older than the cutoff), or below `--min-score` -> `tier3_nurture.xlsx`
 5. everything left -> `tier1_email.xlsx`
 
+## Stage 5 -- outreach profile
+
+Stages 1-4 answer *is this a real shop worth contacting*. Stage 5 answers
+*who do I contact and what do I say*, over the live shops only.
+
+```bash
+python -m pipeline.stage5_profile --tld de,at,ch     # aim it where it pays
+```
+
+It collects three things per shop, in at most two page fetches plus one HEAD:
+
+* **Social accounts** -- LinkedIn (a personal profile in preference to a
+  company page), Instagram, Facebook, minus the share widgets every shop links.
+* **A named human**, from the legal-notice page. This is the finding worth
+  acting on: EU e-commerce law requires the operator's name on that page, and
+  measured on a live sample it yields a named owner for **17% of DACH shops
+  against 1% elsewhere**, while LinkedIn sits at a flat ~10% everywhere with
+  only 3% resolving to a person. For a family-run European shop with no
+  LinkedIn presence at all, the Impressum is the only route to a name.
+* **An image audit** -- image count, missing alt text, lazy loading, responsive
+  `srcset`, modern formats, CDN use, `og:image`, and the byte size of one real
+  product photo (sampled past logos and payment marks, weighed with a HEAD
+  request so nothing is downloaded).
+
 ## Outreach policy
 
 * **tier 1** is the only tier that gets cold email.
