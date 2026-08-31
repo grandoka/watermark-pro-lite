@@ -17,10 +17,13 @@ from .cli import heading, table
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     p.add_argument("--db", default=config.DB_PATH, help="database path")
+    p.add_argument("--min-year", type=int, default=2020, metavar="YEAR",
+                   help="the year cutoff stage 3 will apply (default: %(default)s), "
+                        "so the crawl queue here matches what it will actually fetch")
     return p.parse_args(argv)
 
 
-def funnel(conn) -> list[tuple[str, int, str]]:
+def funnel(conn, min_year: int) -> list[tuple[str, int, str]]:
     """The stage-by-stage narrowing, each step with what it is a share of."""
     total = db.count(conn)
     stores = db.count(conn, "is_freemail = 0")
@@ -38,8 +41,15 @@ def funnel(conn) -> list[tuple[str, int, str]]:
         ("  not yet looked up",
          db.count(conn, "is_freemail = 0 AND dns_checked_at IS NULL AND dns_attempts = 0"),
          "of store domains"),
-        ("stage 3: held below the year cutoff (not crawled)",
-         db.count(conn, f"status = '{config.STATUS_AGED_OUT}'"), "of store domains"),
+        # Stage 3 marks rows aged_out as it starts, so before it has run most
+        # pre-cutoff rows are not flagged yet. Applying the cutoff here as well
+        # keeps "still to fetch" from counting domains that will never be
+        # fetched -- the number an ETA gets built from.
+        (f"stage 3: below the {min_year} cutoff (never fetched)",
+         db.count(conn, "is_freemail = 0 AND dns_resolves = 1 "
+                        "AND created_year IS NOT NULL AND created_year < ?",
+                  (min_year,)),
+         "of store domains"),
         ("stage 3: fetched", db.count(conn, "http_checked_at IS NOT NULL"),
          "of store domains"),
         ("  live", db.count(conn, f"status = '{config.STATUS_LIVE}'"), "of store domains"),
@@ -49,8 +59,10 @@ def funnel(conn) -> list[tuple[str, int, str]]:
          "of store domains"),
         ("  still to fetch",
          db.count(conn, "is_freemail = 0 AND dns_resolves = 1 "
-                        f"AND http_checked_at IS NULL AND http_attempts = 0 "
-                        f"AND status != '{config.STATUS_AGED_OUT}'"),
+                        "AND http_checked_at IS NULL AND http_attempts = 0 "
+                        f"AND status != '{config.STATUS_AGED_OUT}' "
+                        "AND (created_year IS NULL OR created_year >= ?)",
+                  (min_year,)),
          "of store domains"),
         ("stage 4: tiered", db.count(conn, "tier IS NOT NULL"), "of targets"),
     ]
@@ -64,7 +76,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     conn = db.connect(args.db)
     heading(f"Pipeline status -- {args.db}")
-    print(table([(label, f"{n:,}", share) for label, n, share in funnel(conn)],
+    print(table([(label, f"{n:,}", share) for label, n, share in funnel(conn, args.min_year)],
                 ["step", "count", "share"]))
 
     tiers = db.summarize(conn, "tier", "tier IS NOT NULL")
