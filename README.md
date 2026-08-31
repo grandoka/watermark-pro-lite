@@ -113,6 +113,12 @@ Squarespace and OpenCart from body and header signatures, plus `has_cart`,
 By default contacts older than `--min-year` (2020) are **not crawled**; they
 are held for the nurture tier, which roughly halves the run.
 
+As in stage 2, **a timeout is not an answer.** A refused connection or a TLS
+failure is the network answering for the host, so the domain is settled as
+dead; a timeout is just as likely to be our own concurrency, so the domain
+goes back in the queue with `http_attempts` incremented and is given up on
+only after `--max-attempts` runs.
+
 ### Concurrency
 
 The default of 50, with one connection per host, is not just politeness -- it

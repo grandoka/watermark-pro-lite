@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS targets (
     lang              TEXT,
     robots_allowed    INTEGER,
     http_error        TEXT,
+    http_attempts     INTEGER NOT NULL DEFAULT 0,
     http_checked_at   TEXT,
 
     score             INTEGER,

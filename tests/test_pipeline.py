@@ -439,3 +439,78 @@ def test_www_fallback_rescues_a_www_only_store():
     }))
     assert result["dns_resolves"] == 1
     assert result["a_host"] == "www.store.com"
+
+
+# --- stage 3: a timeout is not an answer either -----------------------------
+
+def scripted_fetch(results):
+    """Replacement for stage3.fetch that returns a canned result per URL."""
+    async def _fetch(session, url, retry_timeout=True, timeout=None):
+        for needle, result in results:
+            if needle in url:
+                return dict(result)
+        return {"status": None, "final_url": None, "headers": {}, "body": b"",
+                "content_length": None, "truncated": False, "elapsed_ms": 1,
+                "error": "timeout"}
+    return _fetch
+
+
+def ok(body=b"<html></html>", status=200, headers=None):
+    return {"status": status, "final_url": "https://store.com/", "headers": headers or {},
+            "body": body, "content_length": len(body), "truncated": False,
+            "elapsed_ms": 120, "error": None}
+
+
+def refused():
+    return {"status": None, "final_url": None, "headers": {}, "body": b"",
+            "content_length": None, "truncated": False, "elapsed_ms": 5,
+            "error": "ClientConnectorError"}
+
+
+def run_check(monkeypatch, results, a_host="store.com"):
+    import pipeline.stage3_http as stage3
+    monkeypatch.setattr(stage3, "fetch", scripted_fetch(results))
+    row = {"domain": "store.com", "a_host": a_host}
+    return asyncio.run(stage3.check_domain(object(), row, ignore_robots=True))
+
+
+def test_a_fetch_timeout_is_not_recorded_as_a_dead_store(monkeypatch):
+    record = run_check(monkeypatch, [])  # everything times out
+    assert record["inconclusive"] is True
+
+
+def test_a_refused_connection_is_conclusively_dead(monkeypatch):
+    record = run_check(monkeypatch, [("store.com", refused())])
+    assert record["inconclusive"] is False
+    assert record["status"] == config.STATUS_DEAD
+
+
+def test_a_live_store_is_fingerprinted(monkeypatch):
+    body = (b'<html lang="en"><title>My Shop</title>'
+            b'<script src="https://cdn.shopify.com/s/x.js"></script>'
+            b'<a href="/cart">Cart</a>'
+            b'<script type="application/ld+json">{"@type":"Product"}</script></html>')
+    record = run_check(monkeypatch, [("store.com", ok(body))])
+    assert record["status"] == config.STATUS_LIVE
+    assert record["platform"] == "Shopify"
+    assert record["has_cart"] == 1 and record["has_product_schema"] == 1
+    assert record["page_title"] == "My Shop" and record["lang"] == "en"
+    assert record["inconclusive"] is False
+
+
+def test_a_parked_page_is_not_live(monkeypatch):
+    record = run_check(monkeypatch,
+                       [("store.com", ok(b"<title>This domain is for sale</title>"))])
+    assert record["status"] == config.STATUS_PARKED
+
+
+def test_a_non_200_response_is_an_error_not_a_live_store(monkeypatch):
+    record = run_check(monkeypatch, [("store.com", ok(status=503))])
+    assert record["status"] == config.STATUS_ERROR
+    assert record["http_status"] == 503
+
+
+def test_http_fallback_is_used_when_https_is_refused(monkeypatch):
+    record = run_check(monkeypatch, [("https://store.com", refused()),
+                                     ("http://store.com", ok())])
+    assert record["status"] == config.STATUS_LIVE

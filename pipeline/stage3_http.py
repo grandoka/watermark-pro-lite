@@ -43,6 +43,9 @@ def parse_args(argv=None):
     p.add_argument("--min-year", type=int, default=2020, metavar="YEAR",
                    help="skip crawling contacts older than this; they are held "
                         "for the nurture tier (default: %(default)s, 0 to crawl all)")
+    p.add_argument("--max-attempts", type=int, default=3,
+                   help="give up on a domain that only ever times out after "
+                        "this many runs (default: %(default)s)")
     p.add_argument("--ignore-robots", action="store_true",
                    help="do not fetch robots.txt (for domains you own only)")
     return p.parse_args(argv)
@@ -207,7 +210,7 @@ async def check_domain(session, row, ignore_robots: bool) -> dict:
     record = {"domain": domain, "robots_allowed": 1, **EMPTY_FINGERPRINT,
               "http_status": None, "final_url": None, "response_time_ms": None,
               "content_length": None, "http_error": None,
-              "status": config.STATUS_ERROR}
+              "status": config.STATUS_ERROR, "inconclusive": False}
 
     if not ignore_robots:
         allowed, reason = await robots_allows(session, domain, urls[0])
@@ -229,9 +232,13 @@ async def check_domain(session, row, ignore_robots: bool) -> dict:
 
     record["response_time_ms"] = result["elapsed_ms"]
     if result["status"] is None:
-        # Every scheme failed to produce a response: DNS said it existed, but
-        # nothing is actually serving.
-        record.update(http_error=result["error"], status=config.STATUS_DEAD)
+        # No response at all. A refused connection or a TLS failure is the
+        # network answering for the host, so we can call it dead. A timeout is
+        # not an answer -- it is just as likely to be our own concurrency --
+        # and marking those dead deletes live stores from the list, so they go
+        # back in the queue instead.
+        record.update(http_error=result["error"], status=config.STATUS_DEAD,
+                      inconclusive=(result["error"] == "timeout"))
         return record
 
     record.update(
@@ -268,7 +275,23 @@ UPDATE targets
        robots_allowed     = :robots_allowed,
        http_error         = :http_error,
        status             = :status,
+       http_attempts      = http_attempts + 1,
        http_checked_at    = :checked_at
+ WHERE domain = :domain AND is_freemail = 0
+"""
+
+# Nothing answered, and the reason was a timeout. Count the attempt but leave
+# http_checked_at unset so a later pass retries the domain -- unless it has now
+# failed --max-attempts times, at which point unreachable is the honest answer.
+UPDATE_INCONCLUSIVE = """
+UPDATE targets
+   SET http_error     = :http_error,
+       response_time_ms = :response_time_ms,
+       http_attempts  = http_attempts + 1,
+       status         = CASE WHEN http_attempts + 1 >= :max_attempts
+                            THEN :dead_status ELSE status END,
+       http_checked_at = CASE WHEN http_attempts + 1 >= :max_attempts
+                             THEN :checked_at END
  WHERE domain = :domain AND is_freemail = 0
 """
 
@@ -332,7 +355,12 @@ async def run(conn, rows, args) -> None:
         if not buffer:
             return
         batch, buffer[:] = list(buffer), []
-        conn.executemany(UPDATE, batch)
+        settled = [r for r in batch if not r["inconclusive"]]
+        unsettled = [r for r in batch if r["inconclusive"]]
+        if settled:
+            conn.executemany(UPDATE, settled)
+        if unsettled:
+            conn.executemany(UPDATE_INCONCLUSIVE, unsettled)
         conn.commit()
 
     async with aiohttp.ClientSession(timeout=timeout, connector=connector,
@@ -351,9 +379,12 @@ async def run(conn, rows, args) -> None:
                               "final_url": None, "response_time_ms": None,
                               "content_length": None,
                               "http_error": f"worker:{type(exc).__name__}",
-                              "status": config.STATUS_ERROR}
+                              "status": config.STATUS_ERROR,
+                              "inconclusive": False}
                 record["checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat(
                     timespec="seconds")
+                record["max_attempts"] = args.max_attempts
+                record["dead_status"] = config.STATUS_DEAD
                 async with lock:
                     buffer.append(record)
                     if len(buffer) >= BATCH:
@@ -390,6 +421,14 @@ def print_summary(conn) -> None:
         print("\nEcommerce liveness signals:")
         print(table([(k, f"{n:,}", f"{100*n/live:.1f}%") for k, n in signals],
                     ["signal", "domains", "share"]))
+
+    retryable = db.count(conn, "is_freemail = 0 AND dns_resolves = 1 "
+                               "AND http_checked_at IS NULL AND http_attempts > 0")
+    if retryable:
+        print(f"\n{retryable:,} domains only ever timed out and were left "
+              f"unsettled rather than recorded as dead. Re-run this stage to "
+              f"retry them; a large number here means the concurrency is too "
+              f"high for the network path.")
 
     errors = conn.execute(
         "SELECT http_error, COUNT(*) n FROM targets WHERE http_error IS NOT NULL "
