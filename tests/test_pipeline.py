@@ -514,3 +514,21 @@ def test_http_fallback_is_used_when_https_is_refused(monkeypatch):
     record = run_check(monkeypatch, [("https://store.com", refused()),
                                      ("http://store.com", ok())])
     assert record["status"] == config.STATUS_LIVE
+
+
+def test_an_nxdomain_a_record_settles_the_domain_even_if_mx_flaked():
+    """The domain does not exist, so it has no mail either -- looking again
+    three times over would just cost queries."""
+    result = asyncio.run(check({
+        ("store.com", "MX"): dns.exception.Timeout(),
+    }))
+    assert result["inconclusive"] is False
+    assert result["status"] == config.STATUS_DEAD
+
+
+def test_a_timed_out_a_record_is_never_settled():
+    result = asyncio.run(check({
+        ("store.com", "A"): dns.exception.Timeout(),
+        ("store.com", "MX"): dns.resolver.NoAnswer(),
+    }))
+    assert result["inconclusive"] is True

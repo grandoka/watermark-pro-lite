@@ -99,11 +99,12 @@ async def check_domain(resolver, domain: str, retries: int) -> dict:
     has_mx = bool(mx_answer)
     error = "; ".join(e for e in (a_err, mx_err) if e) or None
 
-    # A lookup that timed out is not an answer. If neither query came back
-    # with anything -- no records *and* no authoritative "no such name" -- we
-    # simply did not get to ask, and recording that as a dead domain would
-    # silently delete a real store from the list. Leave it for another pass.
-    inconclusive = bool(error) and not resolves and not has_mx
+    # A lookup that timed out is not an answer, and recording it as a dead
+    # domain silently deletes a real store from the list -- so leave it for
+    # another pass. But an authoritative "no such name" for the A record *is*
+    # an answer: the domain does not exist, so it can have no mail either, and
+    # a flaky MX query alongside it is no reason to look again.
+    inconclusive = not resolves and not has_mx and a_err is not None
 
     if resolves:
         status = None  # stage 3 decides; leave whatever status it has
