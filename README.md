@@ -24,7 +24,13 @@ python -m pipeline.stage1_ingest                 # read workbooks, dedupe, class
 python -m pipeline.stage2_dns                    # A + MX lookups
 python -m pipeline.stage3_http                   # fetch, fingerprint platform
 python -m pipeline.stage4_score                  # score, tier, write workbooks
+
+python -m pipeline.status                        # where is the run? (read-only)
 ```
+
+`status` is safe to run while a stage is in flight, which is the point -- a
+full run takes hours, and the first question at any moment is what is done and
+what is left.
 
 Flags supported by every stage:
 
