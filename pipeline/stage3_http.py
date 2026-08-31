@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import html as html_module
+import re
 import ssl
 import time
 import urllib.robotparser
@@ -176,11 +177,17 @@ def detect_platform(html: str, headers: dict) -> str | None:
     return None
 
 
+# Control characters other than tab/newline. str.split() does not remove these
+# -- they are not whitespace -- and the xlsx format refuses to store them.
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
+
+
 def extract_title(html: str) -> str | None:
     match = config.TITLE_RE.search(html)
     if not match:
         return None
     title = html_module.unescape(match.group(1))
+    title = CONTROL_CHARS.sub("", title)
     title = " ".join(title.split())
     return title[:300] or None
 

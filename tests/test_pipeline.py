@@ -828,3 +828,33 @@ def test_resume_leaves_the_attempt_counters_alone(tmp_path):
     pending_domains(conn, force=False, limit=None)
     assert conn.execute("SELECT dns_attempts FROM targets").fetchone()[0] == 2
     conn.close()
+
+
+def test_control_characters_are_stripped_from_scraped_titles():
+    """One stray backspace byte in one title out of 59,000 took down the whole
+    export, because the xlsx format refuses to store control characters."""
+    assert extract_title("<title>\x08Huang Chi Stone 煌奇</title>") == "Huang Chi Stone 煌奇"
+    assert extract_title("<title>Café\x1f Shop</title>") == "Café Shop"
+    # Real text, including non-Latin scripts, is untouched.
+    assert extract_title("<title>煌奇石業</title>") == "煌奇石業"
+
+
+def test_the_export_survives_an_illegal_character_in_the_database(tmp_path):
+    import openpyxl as opx
+    from pipeline.stage4_score import main as stage4
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    conn.execute(
+        "INSERT INTO targets (target_key, domain, email, jurisdiction, tld, "
+        "is_freemail, is_role, created_year, dns_resolves, has_mx, status, platform, "
+        "has_cart, has_product_schema, is_parked, http_status, response_time_ms, "
+        "page_title) VALUES ('s.com','s.com','a@s.com','PERMISSIVE','com',0,0,2024,"
+        "1,1,'live','Shopify',1,1,0,200,300, char(8) || 'Stray Backspace Shop')")
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "out"
+    assert stage4(["--db", db_path, "--out-dir", str(out)]) == 0
+    book = opx.load_workbook(str(out / "tier1_email.xlsx"))
+    assert book.worksheets[0].cell(row=4, column=9).value == "Stray Backspace Shop"
+    book.close()

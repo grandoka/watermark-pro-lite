@@ -18,6 +18,7 @@ import datetime as dt
 import os
 
 import openpyxl
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
@@ -196,6 +197,19 @@ def score_all(conn, args) -> int:
 
 # --- workbooks -------------------------------------------------------------
 
+def clean_cell(value):
+    """Strip characters the xlsx format forbids from a scraped string.
+
+    Scraped page titles carry whatever the site served, and control characters
+    do turn up in them. openpyxl refuses to write those, which took down the
+    whole export on a single stray backspace byte in one title out of 59,000 --
+    so every string is cleaned at the write boundary rather than trusted.
+    """
+    if isinstance(value, str):
+        return ILLEGAL_CHARACTERS_RE.sub("", value)
+    return value
+
+
 def write_workbook(conn, tier: str, path: str, note: str) -> int:
     columns = list(OUTPUT_COLUMNS)
     if tier == DROPPED:
@@ -224,7 +238,7 @@ def write_workbook(conn, tier: str, path: str, note: str) -> int:
     for row in conn.execute(
             f"SELECT {select} FROM targets WHERE tier = ? "
             "ORDER BY score DESC, created_year DESC, domain", (tier,)):
-        ws.append([row[c] for c in columns])
+        ws.append([clean_cell(row[c]) for c in columns])
         rows += 1
 
     widths = {"domain": 32, "email": 34, "platform": 14, "score": 7,
